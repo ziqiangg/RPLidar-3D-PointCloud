@@ -1,11 +1,28 @@
 from rplidar import RPLidar
 import time
+import sys
+import os
+import sys
 
-PORT_NAME = "/dev/ttyUSB0"
+# Add parent directory to path to import utils
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.port_config import get_default_port, print_port_info
+
 BAUDRATE = 115200  # A1 default
 
 def main():
-    lidar = RPLidar(PORT_NAME, baudrate=BAUDRATE)
+    # Auto-detect port or use OS-appropriate default
+    port_name = get_default_port()
+    
+    print(f"Using port: {port_name}")
+    print("(You can override by setting PORT_NAME environment variable or passing as argument)\n")
+    
+    # Allow command-line override: python rplidarTest.py COM4
+    if len(sys.argv) > 1:
+        port_name = sys.argv[1]
+        print(f"Port overridden to: {port_name}\n")
+    
+    lidar = RPLidar(port_name, baudrate=BAUDRATE)
 
     try:
         print("Info:", lidar.get_info())

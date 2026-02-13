@@ -1,11 +1,20 @@
-import csv, math, time
+import csv, math, time, sys, os
 from rplidar import RPLidar
+from utils.port_config import get_default_port
 
-PORT = "/dev/ttyUSB0"
 BAUD = 115200
 
 def main():
-    lidar = RPLidar(PORT, baudrate=BAUD, timeout=3)
+    # Auto-detect port or use OS-appropriate default
+    port = get_default_port()
+    
+    # Allow command-line override: python dump_one_scan.py COM4
+    if len(sys.argv) > 1:
+        port = sys.argv[1]
+    
+    print(f"Using port: {port}", flush=True)
+    
+    lidar = RPLidar(port, baudrate=BAUD, timeout=3)
 
     try:
         print("Info:", lidar.get_info(), flush=True)
@@ -45,20 +54,23 @@ def main():
             pts.append((q, ang, dist, x, y, 0.0))
 
         print(f"Writing {len(pts)} points...", flush=True)
+        
+        # Ensure data directory exists
+        os.makedirs("data", exist_ok=True)
 
-        with open("scan.csv", "w", newline="") as f:
+        with open("data/scan.csv", "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["quality", "angle_deg", "distance_mm", "x_m", "y_m", "z_m"])
             w.writerows(pts)
 
-        with open("scan.ply", "w") as f:
+        with open("data/scan.ply", "w") as f:
             f.write("ply\nformat ascii 1.0\n")
             f.write(f"element vertex {len(pts)}\n")
             f.write("property float x\nproperty float y\nproperty float z\nend_header\n")
             for _, _, _, x, y, z in pts:
                 f.write(f"{x:.6f} {y:.6f} {z:.6f}\n")
 
-        print("Done: scan.csv + scan.ply", flush=True)
+        print("Done: data/scan.csv + data/scan.ply", flush=True)
 
     finally:
         try:

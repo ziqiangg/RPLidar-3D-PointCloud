@@ -1,0 +1,10 @@
+# Ignore all scan output files
+*.csv
+*.ply
+*.pcd
+
+#folder
+__pycache__/
+
+# But keep the directory structure
+!.gitkeep
