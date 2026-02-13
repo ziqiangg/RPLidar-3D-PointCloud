@@ -1,2 +1,10 @@
+# RPLidar communication
 rplidar-roboticia
+
+# Serial port detection
 pyserial
+
+# 3D visualization and processing
+open3d==0.19.0
+numpy
+

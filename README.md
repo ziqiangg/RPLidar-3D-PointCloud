@@ -4,18 +4,32 @@ Cross-platform Python toolkit for capturing and processing RPLidar scans into 2D
 
 ## Quick Start
 
-### 1. Install Dependencies
+### 1. Set Up Virtual Environment (Recommended)
+```bash
+# Create virtual environment with Python 3.12
+python3.12 -m venv venv
+
+.\venv\Scripts\Activate.ps1; python --version
+
+# Activate the virtual environment
+# Windows:
+venv\Scripts\activate
+# Linux/Mac:
+source venv/bin/activate
+```
+
+### 2. Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Find Your RPLidar Port
+### 3. Find Your RPLidar Port
 ```bash
 python examples/select_port.py
 ```
 This auto-detects your RPLidar and shows available serial ports.
 
-### 3. Capture a Scan
+### 4. Capture a Scan
 ```bash
 # Auto-detect port
 python dump_one_scan.py
@@ -127,9 +141,10 @@ sudo usermod -a -G dialout $USER
 
 ## Requirements
 
-- Python 3.7+
+- Python 3.12
 - rplidar-roboticia
 - pyserial (auto-installed with rplidar-roboticia)
+- open3d
 
 ## License
 
