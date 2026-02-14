@@ -47,9 +47,6 @@ Output: `data/scan.csv` and `data/scan.ply`
 pip install -r requirements.txt
 
 # Launch file viewer (browse and load any PLY/CSV)
-python viewer/app.py --no-mqtt
-
-# Launch with MQTT edge device control
 python viewer/app.py
 
 # Load specific file on startup
@@ -57,14 +54,13 @@ python viewer/app.py data/scan.ply
 ```
 
 Features:
-- 🎨 Interactive 3D visualization with Open3D
-- 📁 File browser - load any PLY or CSV point cloud
-- 🌐 MQTT edge device control (trigger scans on remote RPLidar)
-- 📊 Real-time status updates from edge device
-- 🔄 Auto-load when edge device completes scan
-- 🖥️ Cross-platform (Windows/Linux/macOS)
+- Interactive 3D visualization with Open3D
+- File browser - load any PLY or CSV point cloud
+- Control RPLidar via USB (CP210 controller)
+- Adjustable point size and rendering options
+- Cross-platform (Windows/Linux/macOS)
 
-**See [viewer/README.md](viewer/README.md) for complete documentation.**
+
 
 
 ## Project Structure
@@ -75,20 +71,15 @@ RPLidar-3D-PointCloud/
 ├── xyzscan_servoless.py  # 3D scan with servo control
 ├── viewer/               # GUI Application
 │   ├── app.py           # Main GUI - file browser + 3D view
-│   ├── mqtt_handler.py   # MQTT edge device communication
 │   ├── point_cloud_loader.py # PLY/CSV file loading
+│   ├── scan_controller.py    # Scan script execution
 │   ├── config.py         # Configuration settings
-│   ├── README.md         # Viewer documentation
-│   └── CHANGES.md        # Recent updates
 ├── utils/
 │   └── port_config.py    # Cross-platform port detection
 ├── examples/
 │   ├── rplidarTest.py    # Test connection & view live scans
-│   ├── select_port.py    # Interactive port selector
-│   └── mqtt_control_example.py  # Edge device control demo
+│   └── select_port.py    # Interactive port selector
 ├── data/                 # Generated scan files (git-ignored)
-├── install_viewer.bat    # Windows install script
-├── install_viewer.sh     # Linux/Mac install script
 └── requirements.txt
 ```
 
@@ -182,7 +173,7 @@ sudo usermod -a -G dialout $USER
 - pyserial (serial port detection)
 - open3d (3D visualization)
 - numpy (numerical operations)
-- paho-mqtt (MQTT communication for viewer)
+- paho-mqtt (mqtt integration)
 
 All dependencies can be installed via:
 ```bash

@@ -4,16 +4,6 @@ Configuration settings for the RPLidar Viewer application.
 
 import os
 
-# MQTT Configuration
-MQTT_BROKER = "localhost"  # Default MQTT broker address
-MQTT_PORT = 1883
-MQTT_KEEPALIVE = 60
-
-# MQTT Topics
-MQTT_TOPIC_SCAN_COMMAND = "rplidar/scan/command"  # Send scan commands to edge device
-MQTT_TOPIC_SCAN_STATUS = "rplidar/scan/status"    # Receive scan status from edge device
-MQTT_TOPIC_SCAN_RESULT = "rplidar/scan/result"    # Receive scan result file path from edge device
-MQTT_TOPIC_SCAN_DATA = "rplidar/scan/data"        # Receive actual scan data (optional)
 
 # Scan Types
 SCAN_TYPE_2D = "2d"
