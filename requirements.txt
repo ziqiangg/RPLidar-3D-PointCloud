@@ -8,3 +8,6 @@ pyserial
 open3d==0.19.0
 numpy
 
+# MQTT communication
+paho-mqtt>=1.6.1
+
