@@ -8,6 +8,8 @@ import os
 import sys
 import subprocess
 import threading
+import tkinter as tk
+from tkinter import filedialog
 import numpy as np
 import open3d as o3d
 import open3d.visualization.gui as gui
@@ -212,9 +214,16 @@ class RPLidarViewerApp:
             self.scene_widget.scene = rendering.Open3DScene(self.window.renderer)
             self.scene_widget.scene.set_background(config.BACKGROUND_COLOR)
             
-            # Enable mouse/keyboard interaction
-            self.scene_widget.scene.scene.enable_sun_light(True)
+            # Enable axes (no lighting needed for unlit shader)
+            self.scene_widget.scene.show_axes(True)
             print("[DEBUG] SceneWidget created and configured")
+            
+            # Set up default camera view
+            bounds = o3d.geometry.AxisAlignedBoundingBox(
+                min_bound=np.array([-1, -1, -1], dtype=np.float32), 
+                max_bound=np.array([1, 1, 1], dtype=np.float32)
+            )
+            self.scene_widget.setup_camera(60.0, bounds, np.array([0, 0, 0], dtype=np.float32))
             
             # Add scene widget - this will expand to fill space
             tab.add_child(self.scene_widget)
@@ -241,9 +250,14 @@ class RPLidarViewerApp:
     
     def _on_close(self):
         """Handle window close event."""
-        print("Shutting down...")
-        if self.scan_controller.is_running():
-            self.scan_controller.stop_scan()
+        print("[DEBUG] Window close requested")
+        try:
+            if self.scan_controller.is_running():
+                print("[DEBUG] Stopping running scan...")
+                self.scan_controller.stop_scan()
+            print("[DEBUG] Cleanup complete")
+        except Exception as e:
+            print(f"[DEBUG] Error during cleanup: {e}")
         return True
     
     def _on_tab_changed(self, idx):
@@ -252,6 +266,7 @@ class RPLidarViewerApp:
         tab_names = ["Scan Control", "Visualization"]
         if idx < len(tab_names):
             print(f"[DEBUG] Now viewing: {tab_names[idx]} tab")
+            # Note: Don't call post_redraw here - let the tab content handle its own rendering
     
     def _on_script_2d_checked(self, checked):
         """Handle 2D script checkbox."""
@@ -317,50 +332,103 @@ class RPLidarViewerApp:
         """Callback for scan completion."""
         print(f"[DEBUG] Scan complete callback: type={scan_type}, success={success}, file={file_path}")
         if success and os.path.exists(file_path):
-            # Auto-switch to visualization tab and load file
-            def load_result():
-                print(f"[DEBUG] Auto-switching to viz tab and loading {file_path}")
-                self.tabs.selected_tab_index = 1  # Switch to viz tab
-                self.load_and_display_file(file_path)
-            
-            gui.Application.instance.post_to_main_thread(self.window, load_result)
+            # Just notify - don't auto-load to avoid threading issues
+            # User can manually switch to viz tab and load
+            print(f"[INFO] Scan saved to: {file_path}")
+            print(f"[INFO] Switch to Visualization tab and click 'Load File...' to view results")
     
     def _on_load_file(self):
         """Handle load file button click."""
         print("[DEBUG] Load file button clicked")
-        file_dialog = gui.FileDialog(gui.FileDialog.OPEN, "Select Point Cloud File", self.window.theme)
-        file_dialog.add_filter(".ply .csv", "Point Cloud files (.ply, .csv)")
-        file_dialog.add_filter(".ply", "PLY files (.ply)")
-        file_dialog.add_filter(".csv", "CSV files (.csv)")
-        file_dialog.add_filter("", "All files")
         
-        file_dialog.set_on_cancel(self._on_file_dialog_cancel)
-        file_dialog.set_on_done(self._on_file_dialog_done)
-        self.window.show_dialog(file_dialog)
-    
-    def _on_file_dialog_cancel(self):
-        """Handle file dialog cancel."""
-        self.window.close_dialog()
-    
-    def _on_file_dialog_done(self, filename):
-        """Handle file dialog completion."""
-        self.window.close_dialog()
-        self.load_and_display_file(filename)
+        try:
+            # CRITICAL FIX: Run tkinter dialog in separate thread to avoid crash (Issue #4427)
+            # https://github.com/isl-org/Open3D/issues/4427
+            selected_file = [None]  # Use list to store result from thread
+            
+            def ask_file():
+                """Run file dialog in separate thread."""
+                root = tk.Tk()
+                root.withdraw()  # Hide the root window
+                root.attributes('-topmost', True)  # Bring dialog to front
+                
+                # Set initial directory
+                initial_dir = config.DATA_DIR if os.path.exists(config.DATA_DIR) else os.getcwd()
+                
+                print("[DEBUG] Opening file dialog...")
+                filename = filedialog.askopenfilename(
+                    parent=root,
+                    title="Select Point Cloud File",
+                    initialdir=initial_dir,
+                    filetypes=[
+                        ("Point Cloud files", "*.ply *.csv"),
+                        ("PLY files", "*.ply"),
+                        ("CSV files", "*.csv"),
+                        ("All files", "*.*")
+                    ]
+                )
+                
+                root.destroy()  # Clean up Tk window
+                selected_file[0] = filename  # Store result
+            
+            # Run dialog in thread and wait for completion
+            dialog_thread = threading.Thread(target=ask_file)
+            dialog_thread.start()
+            dialog_thread.join()  # Wait for thread to complete
+            
+            filename = selected_file[0]
+            
+            if filename:
+                print(f"[DEBUG] File selected: {filename}")
+                self.load_and_display_file(filename)
+            else:
+                print("[DEBUG] File dialog cancelled")
+                
+        except Exception as e:
+            print(f"[DEBUG] File dialog error: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _on_clear(self):
         """Handle clear button click."""
         print("[DEBUG] Clear button clicked")
-        self.scene_widget.scene.clear_geometry()
-        self.current_file = None
-        self._update_info_label("No point cloud loaded")
-        self._update_viz_status("Cleared")
+        
+        try:
+            self.scene_widget.scene.clear_geometry()
+            self.current_file = None
+            self._update_info_label("No point cloud loaded")
+            self._update_viz_status("Cleared")
+            
+            # Use force_redraw for SceneWidget
+            self.scene_widget.force_redraw()
+            print("[DEBUG] Clear complete")
+            
+        except Exception as e:
+            print(f"[DEBUG] Clear error: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _on_point_size_changed(self, value):
         """Handle point size slider change."""
+        print(f"[DEBUG] Point size changed to: {value}")
         self.point_size = float(value)
-        # Reload current file with new point size if loaded
-        if self.current_file and os.path.exists(self.current_file):
-            self.load_and_display_file(self.current_file)
+        
+        # Update existing geometry's point size without reloading
+        if self.scene_widget.scene.has_geometry("points"):
+            # Remove and re-add with new material
+            if self.current_file and os.path.exists(self.current_file):
+                print("[DEBUG] Reloading with new point size...")
+                pcd = self.loader.load_file(self.current_file)
+                if pcd:
+                    self.scene_widget.scene.remove_geometry("points")
+                    
+                    material = rendering.MaterialRecord()
+                    material.shader = "defaultUnlit"  # Match the shader used in load_and_display_file
+                    material.point_size = self.point_size
+                    
+                    self.scene_widget.scene.add_geometry("points", pcd, material, add_downsampled_copy_for_fast_rendering=False)
+                    self.scene_widget.force_redraw()
+                    print("[DEBUG] Point size updated")
     
     def load_and_display_file(self, file_path: str):
         """Load and display a point cloud file."""
@@ -380,16 +448,40 @@ class RPLidarViewerApp:
             self.scene_widget.scene.clear_geometry()
             print("[DEBUG] Geometry cleared")
             
-            # Add point cloud to scene
+            # Add point cloud to scene with MaterialRecord (REQUIRED!)
             print("[DEBUG] Creating material...")
             material = rendering.MaterialRecord()
-            material.shader = "defaultUnlit"
+            material.shader = "defaultUnlit"  # Unlit shader doesn't require lighting setup
             material.point_size = self.point_size
             print(f"[DEBUG] Material created with point_size={self.point_size}")
             
             print("[DEBUG] Adding geometry to scene...")
-            self.scene_widget.scene.add_geometry("points", pcd, material)
-            print("[DEBUG] Geometry added")
+            # Verify geometry has points
+            print(f"[DEBUG] Geometry has {len(pcd.points)} points")
+            print(f"[DEBUG] Points has colors: {pcd.has_colors()}")
+            
+            # Validate geometry before adding
+            if len(pcd.points) == 0:
+                print("[DEBUG] ERROR: Point cloud is empty!")
+                self._update_viz_status("Error: Empty point cloud")
+                return
+            
+            # Ensure geometry is valid
+            if pcd.has_colors():
+                colors = np.asarray(pcd.colors)
+                if np.any(np.isnan(colors)) or np.any(np.isinf(colors)):
+                    print("[DEBUG] WARNING: Colors contain NaN or Inf, regenerating...")
+                    pcd.colors = o3d.utility.Vector3dVector(np.tile([1.0, 0.0, 0.0], (len(pcd.points), 1)))
+            
+            points = np.asarray(pcd.points)
+            if np.any(np.isnan(points)) or np.any(np.isinf(points)):
+                print("[DEBUG] ERROR: Points contain NaN or Inf!")
+                self._update_viz_status("Error: Invalid geometry data")
+                return
+            
+            # CRITICAL: Disable downsampled copy which causes rendering bugs (Issue #6464)
+            self.scene_widget.scene.add_geometry("points", pcd, material, add_downsampled_copy_for_fast_rendering=False)
+            print("[DEBUG] Geometry added (downsampling disabled)")
             
             # Setup camera properly
             print("[DEBUG] Setting up camera...")
@@ -400,20 +492,38 @@ class RPLidarViewerApp:
                 print(f"[DEBUG] Bounds center: {center}, extent: {extent}")
                 
                 # Calculate appropriate camera distance
-                max_extent = max(extent)
+                max_extent = max(extent[0], extent[1], 0.1)  # Use at least 0.1 for flat scans
                 cam_distance = max_extent * 2.0
                 print(f"[DEBUG] Camera distance: {cam_distance}")
                 
+                # For 2D scans (flat in XY), adjust the viewing angle
+                is_2d_scan = extent[2] < 0.01  # Z extent is nearly zero
+                print(f"[DEBUG] Is 2D scan: {is_2d_scan}")
+                
+                # Expand bounds for 2D scans to avoid clipping issues
+                if is_2d_scan:
+                    # Add some thickness to the bounding box for camera setup
+                    bounds = o3d.geometry.AxisAlignedBoundingBox(
+                        min_bound=np.array([bounds.min_bound[0], bounds.min_bound[1], -0.5], dtype=np.float32),
+                        max_bound=np.array([bounds.max_bound[0], bounds.max_bound[1], 0.5], dtype=np.float32)
+                    )
+                    print("[DEBUG] Expanded bounds for 2D scan")
+                
                 # Setup camera with proper bounds
                 print("[DEBUG] Calling setup_camera...")
+                center = center.astype(np.float32)
+                
+                # Validate camera parameters
+                if np.any(np.isnan(center)) or np.any(np.isinf(center)):
+                    print("[DEBUG] ERROR: Camera center contains NaN or Inf!")
+                    center = np.array([0, 0, 0], dtype=np.float32)
+                
                 self.scene_widget.setup_camera(60.0, bounds, center)
                 print("[DEBUG] setup_camera complete")
                 
-                # Look at the center from a good viewing angle
-                eye = center + np.array([cam_distance, cam_distance, cam_distance * 0.5])
-                print(f"[DEBUG] Calling look_at with center={center}, eye={eye}")
-                self.scene_widget.look_at(center, eye, [0, 0, 1])
-                print("[DEBUG] Camera setup complete")
+                # DON'T call look_at - it may be causing the crash
+                # setup_camera should be sufficient to view the geometry
+                print("[DEBUG] Camera setup complete (skipping look_at)")
                 
             except Exception as e:
                 print(f"Camera setup warning: {e}")
@@ -435,8 +545,15 @@ class RPLidarViewerApp:
             
             self._update_info_label(info_text)
             self._update_viz_status(f"Loaded: {filename}")
+            
+            print("[DEBUG] Calling force_redraw() to update scene...")
+            # CRITICAL: Use force_redraw() instead of window.post_redraw()
+            # This ensures the SceneWidget actually renders the geometry
+            self.scene_widget.force_redraw()
+            print("[DEBUG] Load complete - scene force refreshed")
         else:
             self._update_viz_status(f"Failed to load: {file_path}")
+            self.window.post_redraw()
     
     def _update_info_label(self, text: str):
         """Update the info label."""
@@ -461,15 +578,20 @@ class RPLidarViewerApp:
         self.initialize_gui()
         print("[DEBUG] GUI initialized")
         
-        # Load initial file if specified
-        if initial_file and os.path.exists(initial_file):
-            self.tabs.selected_tab_index = 1  # Switch to viz tab
-            self.load_and_display_file(initial_file)
+        # Don't auto-load files - let user manually load via the Load button
+        if initial_file:
+            print(f"[INFO] To view {initial_file}, switch to Visualization tab and click 'Load File...'")
         
         # Run the application
         print("[DEBUG] Starting GUI main loop...")
-        gui.Application.instance.run()
-        print("[DEBUG] GUI main loop ended")
+        try:
+            gui.Application.instance.run()
+            print("[DEBUG] GUI main loop ended normally")
+        except Exception as e:
+            print(f"[ERROR] GUI main loop error: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
 
 def main():
