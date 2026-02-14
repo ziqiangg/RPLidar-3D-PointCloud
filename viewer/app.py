@@ -178,11 +178,12 @@ class RPLidarViewerApp:
         """Create the visualization tab."""
         print("[DEBUG] _create_visualization_tab called")
         try:
+            # Use a vertical layout with proper spacing
             tab = gui.Vert(0, gui.Margins(0, 0, 0, 0))
             print("[DEBUG] Tab container created")
             
-            # Top control bar
-            control_bar = gui.Horiz(0.5 * em, gui.Margins(em, em, em, 0))
+            # Top control bar (fixed height)
+            control_bar = gui.Horiz(0.5 * em, gui.Margins(em, em, em, em))
             
             load_btn = gui.Button("Load File...")
             load_btn.set_on_clicked(self._on_load_file)
@@ -205,20 +206,22 @@ class RPLidarViewerApp:
             tab.add_child(control_bar)
             print("[DEBUG] Control bar added")
             
-            # 3D scene widget
+            # 3D scene widget (should expand to fill available space)
             print("[DEBUG] Creating SceneWidget...")
             self.scene_widget = gui.SceneWidget()
-            print("[DEBUG] SceneWidget created")
-            print("[DEBUG] Creating Open3DScene...")
             self.scene_widget.scene = rendering.Open3DScene(self.window.renderer)
-            print("[DEBUG] Setting background...")
             self.scene_widget.scene.set_background(config.BACKGROUND_COLOR)
-            print("[DEBUG] Adding scene widget to tab...")
+            
+            # Enable mouse/keyboard interaction
+            self.scene_widget.scene.scene.enable_sun_light(True)
+            print("[DEBUG] SceneWidget created and configured")
+            
+            # Add scene widget - this will expand to fill space
             tab.add_child(self.scene_widget)
             print("[DEBUG] SceneWidget added to tab")
             
-            # Info panel at bottom
-            info_panel = gui.Vert(0, gui.Margins(em, 0, em, em))
+            # Info panel at bottom (fixed height)
+            info_panel = gui.Vert(0, gui.Margins(em, em, em, em))
             
             self.info_label = gui.Label("No point cloud loaded")
             info_panel.add_child(self.info_label)

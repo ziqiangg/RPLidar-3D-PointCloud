@@ -57,6 +57,7 @@ Features:
 - Interactive 3D visualization with Open3D
 - File browser - load any PLY or CSV point cloud
 - Control RPLidar via USB (CP210 controller)
+- Real-time scan execution and monitoring
 - Adjustable point size and rendering options
 - Cross-platform (Windows/Linux/macOS)
 
@@ -173,7 +174,7 @@ sudo usermod -a -G dialout $USER
 - pyserial (serial port detection)
 - open3d (3D visualization)
 - numpy (numerical operations)
-- paho-mqtt (mqtt integration)
+- paho-mqtt (MQTT communication for viewer)
 
 All dependencies can be installed via:
 ```bash
