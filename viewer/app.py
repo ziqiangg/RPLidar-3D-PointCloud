@@ -47,13 +47,13 @@ class RPLidarViewerApp:
         # GUI components
         self.window = None
         self.tabs = None
-        self.scene_widget = None
         self.info_label = None
         self.viz_status_label = None
         self.scan_status_label = None
         
         # State
         self.current_file = None
+        self.current_pcd = None  # Store loaded point cloud
         self.point_size = config.POINT_SIZE
         
     def initialize_gui(self):
@@ -77,7 +77,6 @@ class RPLidarViewerApp:
         
         # Create tabbed interface
         self.tabs = gui.TabControl()
-        self.tabs.set_on_selected_tab_changed(self._on_tab_changed)
         
         # Tab 1: Scan Control
         print("[DEBUG] Creating scan control tab...")
@@ -85,7 +84,7 @@ class RPLidarViewerApp:
         self.tabs.add_tab("Scan Control", scan_tab)
         print("[DEBUG] Scan control tab added")
         
-        # Tab 2: Visualization CONTROLS ONLY (no SceneWidget inside)
+        # Tab 2: Visualization Controls
         print("[DEBUG] Creating visualization controls...")
         viz_controls = self._create_visualization_controls(em)
         print("[DEBUG] Visualization controls created, adding to tabs...")
@@ -94,15 +93,6 @@ class RPLidarViewerApp:
         
         # Add TabControl to main layout
         main_layout.add_child(self.tabs)
-        
-        # Create SceneWidget DIRECTLY in main layout (not nested in tabs!)
-        # This is CRITICAL - SceneWidget mouse breaks when inside layouts (Issue #5268)
-        print("[DEBUG] Creating SceneWidget OUTSIDE tab structure...")
-        self._create_scene_widget()
-        
-        # Add SceneWidget directly - it will expand to fill remaining space
-        main_layout.add_child(self.scene_widget)
-        print("[DEBUG] SceneWidget added directly to main layout")
         
         self.window.add_child(main_layout)
         
@@ -187,12 +177,21 @@ class RPLidarViewerApp:
         return tab
     
     def _create_visualization_controls(self, em: float) -> gui.Widget:
-        """Create the visualization control panel (NO SceneWidget - that's added directly)."""
+        """Create the visualization control panel."""
         print("[DEBUG] _create_visualization_controls called")
         try:
             # Vertical layout for controls
             controls = gui.Vert(0.5 * em, gui.Margins(em, em, em, em))
             print("[DEBUG] Controls container created")
+            
+            # Title
+            title = gui.Label("Point Cloud Visualization")
+            controls.add_child(title)
+            controls.add_fixed(em)
+            
+            # Control panel
+            control_panel = gui.CollapsableVert("File Controls", 0.25 * em, gui.Margins(em, 0, 0, 0))
+            control_panel.set_is_open(True)
             
             # Top control bar
             control_bar = gui.Horiz(0.5 * em, gui.Margins(0, 0, 0, 0))
@@ -207,19 +206,38 @@ class RPLidarViewerApp:
             
             control_bar.add_stretch()
             
+            control_panel.add_child(control_bar)
+            controls.add_child(control_panel)
+            controls.add_fixed(em)
+            
+            # Visualization panel
+            viz_panel = gui.CollapsableVert("Visualization", 0.25 * em, gui.Margins(em, 0, 0, 0))
+            viz_panel.set_is_open(True)
+            
             # Point size control
-            control_bar.add_child(gui.Label("Point Size:"))
+            size_horiz = gui.Horiz(0.5 * em)
+            size_horiz.add_child(gui.Label("Point Size:"))
             self.point_size_slider = gui.Slider(gui.Slider.INT)
             self.point_size_slider.set_limits(1, 10)
             self.point_size_slider.int_value = int(self.point_size)
             self.point_size_slider.set_on_value_changed(self._on_point_size_changed)
-            control_bar.add_child(self.point_size_slider)
+            size_horiz.add_child(self.point_size_slider)
+            viz_panel.add_child(size_horiz)
             
-            controls.add_child(control_bar)
-            print("[DEBUG] Control bar added")
+            viz_panel.add_fixed(em * 0.5)
+            
+            # Visualize button
+            self.visualize_btn = gui.Button("Visualize in 3D Window")
+            self.visualize_btn.set_on_clicked(self._on_visualize)
+            self.visualize_btn.enabled = False  # Disabled until file loaded
+            viz_panel.add_child(self.visualize_btn)
+            
+            controls.add_child(viz_panel)
+            controls.add_fixed(em)
             
             # Info panel
-            info_panel = gui.Vert(0, gui.Margins(0, em, 0, 0))
+            info_panel = gui.CollapsableVert("Information", 0.25 * em, gui.Margins(em, 0, 0, 0))
+            info_panel.set_is_open(True)
             
             self.info_label = gui.Label("No point cloud loaded")
             info_panel.add_child(self.info_label)
@@ -238,31 +256,6 @@ class RPLidarViewerApp:
             traceback.print_exc()
             raise
     
-    def _create_scene_widget(self):
-        """Create SceneWidget directly (NO layout nesting - fixes Issue #5268)."""
-        print("[DEBUG] Creating SceneWidget...")
-        self.scene_widget = gui.SceneWidget()
-        self.scene_widget.scene = rendering.Open3DScene(self.window.renderer)
-        self.scene_widget.scene.set_background(config.BACKGROUND_COLOR)
-        
-        # Enable axes (no lighting needed for unlit shader)
-        self.scene_widget.scene.show_axes(True)
-        print("[DEBUG] SceneWidget created and configured")
-        
-        # Set up default camera view
-        bounds = o3d.geometry.AxisAlignedBoundingBox(
-            min_bound=np.array([-1, -1, -1], dtype=np.float32), 
-            max_bound=np.array([1, 1, 1], dtype=np.float32)
-        )
-        self.scene_widget.setup_camera(60.0, bounds, np.array([0, 0, 0], dtype=np.float32))
-        
-        # Set view controls for mouse interaction
-        self.scene_widget.set_view_controls(gui.SceneWidget.Controls.ROTATE_CAMERA)
-        
-        # Start hidden (will be shown when Visualization tab is selected)
-        self.scene_widget.visible = False
-        print("[DEBUG] SceneWidget camera and controls configured")
-    
     def _on_close(self):
         """Handle window close event."""
         print("[DEBUG] Window close requested")
@@ -274,22 +267,6 @@ class RPLidarViewerApp:
         except Exception as e:
             print(f"[DEBUG] Error during cleanup: {e}")
         return True
-    
-    def _on_tab_changed(self, idx):
-        """Handle tab change event."""
-        print(f"[DEBUG] Tab changed to index: {idx}")
-        tab_names = ["Scan Control", "Visualization"]
-        if idx < len(tab_names):
-            print(f"[DEBUG] Now viewing: {tab_names[idx]} tab")
-            
-            # Show SceneWidget only when Visualization tab is selected (index 1)
-            if hasattr(self, 'scene_widget'):
-                if idx == 1:  # Visualization tab
-                    self.scene_widget.visible = True
-                    print("[DEBUG] SceneWidget visible")
-                else:
-                    self.scene_widget.visible = False
-                    print("[DEBUG] SceneWidget hidden")
     
     def _on_script_2d_checked(self, checked):
         """Handle 2D script checkbox."""
@@ -416,45 +393,31 @@ class RPLidarViewerApp:
         """Handle clear button click."""
         print("[DEBUG] Clear button clicked")
         
-        try:
-            self.scene_widget.scene.clear_geometry()
-            self.current_file = None
-            self._update_info_label("No point cloud loaded")
-            self._update_viz_status("Cleared")
-            
-            # Use force_redraw for SceneWidget
-            self.scene_widget.force_redraw()
-            print("[DEBUG] Clear complete")
-            
-        except Exception as e:
-            print(f"[DEBUG] Clear error: {e}")
-            import traceback
-            traceback.print_exc()
+        def clear_operation():
+            try:
+                self.current_file = None
+                self.current_pcd = None
+                self._update_info_label("No point cloud loaded")
+                self._update_viz_status("Cleared")
+                self.visualize_btn.enabled = False
+                print("[DEBUG] Clear complete")
+                
+            except Exception as e:
+                print(f"[DEBUG] Clear error: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Post to main thread to ensure thread-safe GUI updates
+        gui.Application.instance.post_to_main_thread(self.window, clear_operation)
     
     def _on_point_size_changed(self, value):
         """Handle point size slider change."""
         print(f"[DEBUG] Point size changed to: {value}")
         self.point_size = float(value)
-        
-        # Update existing geometry's point size without reloading
-        if self.scene_widget.scene.has_geometry("points"):
-            # Remove and re-add with new material
-            if self.current_file and os.path.exists(self.current_file):
-                print("[DEBUG] Reloading with new point size...")
-                pcd = self.loader.load_file(self.current_file)
-                if pcd:
-                    self.scene_widget.scene.remove_geometry("points")
-                    
-                    material = rendering.MaterialRecord()
-                    material.shader = "defaultUnlit"  # Match the shader used in load_and_display_file
-                    material.point_size = self.point_size
-                    
-                    self.scene_widget.scene.add_geometry("points", pcd, material, add_downsampled_copy_for_fast_rendering=False)
-                    self.scene_widget.force_redraw()
-                    print("[DEBUG] Point size updated")
+        # Point size will be applied when visualize button is clicked
     
     def load_and_display_file(self, file_path: str):
-        """Load and display a point cloud file."""
+        """Load a point cloud file."""
         print(f"[DEBUG] load_and_display_file called with: {file_path}")
         if not os.path.exists(file_path):
             print(f"[DEBUG] File not found: {file_path}")
@@ -466,93 +429,23 @@ class RPLidarViewerApp:
         print(f"[DEBUG] File loaded, pcd is None: {pcd is None}")
         
         if pcd:
-            print("[DEBUG] Clearing existing geometry...")
-            # Clear existing geometry
-            self.scene_widget.scene.clear_geometry()
-            print("[DEBUG] Geometry cleared")
-            
-            # Add point cloud to scene with MaterialRecord (REQUIRED!)
-            print("[DEBUG] Creating material...")
-            material = rendering.MaterialRecord()
-            material.shader = "defaultUnlit"  # Unlit shader doesn't require lighting setup
-            material.point_size = self.point_size
-            print(f"[DEBUG] Material created with point_size={self.point_size}")
-            
-            print("[DEBUG] Adding geometry to scene...")
-            # Verify geometry has points
-            print(f"[DEBUG] Geometry has {len(pcd.points)} points")
-            print(f"[DEBUG] Points has colors: {pcd.has_colors()}")
-            
-            # Validate geometry before adding
+            # Validate geometry
             if len(pcd.points) == 0:
                 print("[DEBUG] ERROR: Point cloud is empty!")
                 self._update_viz_status("Error: Empty point cloud")
                 return
             
-            # Ensure geometry is valid
-            if pcd.has_colors():
-                colors = np.asarray(pcd.colors)
-                if np.any(np.isnan(colors)) or np.any(np.isinf(colors)):
-                    print("[DEBUG] WARNING: Colors contain NaN or Inf, regenerating...")
-                    pcd.colors = o3d.utility.Vector3dVector(np.tile([1.0, 0.0, 0.0], (len(pcd.points), 1)))
+            # Add bright colors if missing
+            if not pcd.has_colors():
+                print("[DEBUG] Adding default red colors...")
+                colors = np.tile([1.0, 0.0, 0.0], (len(pcd.points), 1))
+                pcd.colors = o3d.utility.Vector3dVector(colors)
             
-            points = np.asarray(pcd.points)
-            if np.any(np.isnan(points)) or np.any(np.isinf(points)):
-                print("[DEBUG] ERROR: Points contain NaN or Inf!")
-                self._update_viz_status("Error: Invalid geometry data")
-                return
-            
-            # CRITICAL: Disable downsampled copy which causes rendering bugs (Issue #6464)
-            self.scene_widget.scene.add_geometry("points", pcd, material, add_downsampled_copy_for_fast_rendering=False)
-            print("[DEBUG] Geometry added (downsampling disabled)")
-            
-            # Setup camera properly
-            print("[DEBUG] Setting up camera...")
-            try:
-                bounds = pcd.get_axis_aligned_bounding_box()
-                center = bounds.get_center()
-                extent = bounds.get_extent()
-                print(f"[DEBUG] Bounds center: {center}, extent: {extent}")
-                
-                # Calculate appropriate camera distance
-                max_extent = max(extent[0], extent[1], 0.1)  # Use at least 0.1 for flat scans
-                cam_distance = max_extent * 2.0
-                print(f"[DEBUG] Camera distance: {cam_distance}")
-                
-                # For 2D scans (flat in XY), adjust the viewing angle
-                is_2d_scan = extent[2] < 0.01  # Z extent is nearly zero
-                print(f"[DEBUG] Is 2D scan: {is_2d_scan}")
-                
-                # Expand bounds for 2D scans to avoid clipping issues
-                if is_2d_scan:
-                    # Add some thickness to the bounding box for camera setup
-                    bounds = o3d.geometry.AxisAlignedBoundingBox(
-                        min_bound=np.array([bounds.min_bound[0], bounds.min_bound[1], -0.5], dtype=np.float32),
-                        max_bound=np.array([bounds.max_bound[0], bounds.max_bound[1], 0.5], dtype=np.float32)
-                    )
-                    print("[DEBUG] Expanded bounds for 2D scan")
-                
-                # Setup camera with proper bounds
-                print("[DEBUG] Calling setup_camera...")
-                center = center.astype(np.float32)
-                
-                # Validate camera parameters
-                if np.any(np.isnan(center)) or np.any(np.isinf(center)):
-                    print("[DEBUG] ERROR: Camera center contains NaN or Inf!")
-                    center = np.array([0, 0, 0], dtype=np.float32)
-                
-                self.scene_widget.setup_camera(60.0, bounds, center)
-                print("[DEBUG] setup_camera complete")
-                
-                # DON'T call look_at - it may be causing the crash
-                # setup_camera should be sufficient to view the geometry
-                print("[DEBUG] Camera setup complete (skipping look_at)")
-                
-            except Exception as e:
-                print(f"Camera setup warning: {e}")
+            # Store the loaded point cloud
+            self.current_pcd = pcd
+            self.current_file = file_path
             
             # Update info label
-            self.current_file = file_path
             count = self.loader.get_point_count()
             bounds_tuple = self.loader.get_bounds()
             
@@ -569,14 +462,46 @@ class RPLidarViewerApp:
             self._update_info_label(info_text)
             self._update_viz_status(f"Loaded: {filename}")
             
-            print("[DEBUG] Calling force_redraw() to update scene...")
-            # CRITICAL: Use force_redraw() instead of window.post_redraw()
-            # This ensures the SceneWidget actually renders the geometry
-            self.scene_widget.force_redraw()
-            print("[DEBUG] Load complete - scene force refreshed")
+            # Enable visualize button
+            self.visualize_btn.enabled = True
+            
+            print("[DEBUG] Load complete - click 'Visualize' to view")
         else:
             self._update_viz_status(f"Failed to load: {file_path}")
-            self.window.post_redraw()
+    
+    def _on_visualize(self):
+        """Open the point cloud in a classic viewer window via subprocess."""
+        print("[DEBUG] Visualize button clicked")
+        
+        if not self.current_file or not os.path.exists(self.current_file):
+            print("[DEBUG] No valid file loaded")
+            self._update_viz_status("Error: No point cloud loaded")
+            return
+        
+        try:
+            # Launch standalone viewer as subprocess (prevents GLFW conflicts)
+            viewer_script = os.path.join(os.path.dirname(__file__), 'standalone_viewer.py')
+            python_exe = sys.executable
+            
+            # Build command
+            cmd = [python_exe, viewer_script, self.current_file, str(int(self.point_size))]
+            
+            print(f"[DEBUG] Launching viewer subprocess: {' '.join(cmd)}")
+            
+            # Use Popen to launch non-blocking subprocess
+            subprocess.Popen(
+                cmd,
+                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
+            )
+            
+            self._update_viz_status("Viewer window opened")
+            print("[DEBUG] Viewer subprocess launched")
+            
+        except Exception as e:
+            print(f"[DEBUG] Viewer error: {e}")
+            import traceback
+            traceback.print_exc()
+            self._update_viz_status(f"Error: {str(e)}")
     
     def _update_info_label(self, text: str):
         """Update the info label."""
