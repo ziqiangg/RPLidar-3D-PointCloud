@@ -41,12 +41,40 @@ python dump_one_scan.py /dev/ttyUSB0  # Linux
 
 Output: `data/scan.csv` and `data/scan.ply`
 
+### 5. Visualize Scans with GUI 
+```bash
+# Install viewer dependencies (includes open3d)
+pip install -r requirements.txt
+
+# Launch file viewer (browse and load any PLY/CSV)
+python viewer/app.py
+
+# Load specific file on startup
+python viewer/app.py data/scan.ply
+```
+
+Features:
+- Interactive 3D visualization with Open3D
+- File browser - load any PLY or CSV point cloud
+- Control RPLidar via USB (CP210 controller)
+- Real-time scan execution and monitoring
+- Adjustable point size and rendering options
+- Cross-platform (Windows/Linux/macOS)
+
+
+
+
 ## Project Structure
 
 ```
 RPLidar-3D-PointCloud/
 ├── dump_one_scan.py      # Main: Capture single 2D scan → CSV/PLY
-├── xyzscan_servoless.py  # (Future) 3D scan with servo control
+├── xyzscan_servoless.py  # 3D scan with servo control
+├── viewer/               # GUI Application
+│   ├── app.py           # Main GUI - file browser + 3D view
+│   ├── point_cloud_loader.py # PLY/CSV file loading
+│   ├── scan_controller.py    # Scan script execution
+│   ├── config.py         # Configuration settings
 ├── utils/
 │   └── port_config.py    # Cross-platform port detection
 ├── examples/
@@ -142,9 +170,16 @@ sudo usermod -a -G dialout $USER
 ## Requirements
 
 - Python 3.12
-- rplidar-roboticia
-- pyserial (auto-installed with rplidar-roboticia)
-- open3d
+- rplidar-roboticia (RPLidar communication)
+- pyserial (serial port detection)
+- open3d (3D visualization)
+- numpy (numerical operations)
+- paho-mqtt (MQTT communication for viewer)
+
+All dependencies can be installed via:
+```bash
+pip install -r requirements.txt
+```
 
 ## License
 
