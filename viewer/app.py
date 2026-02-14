@@ -73,7 +73,7 @@ class RPLidarViewerApp:
         em = self.window.theme.font_size
         
         # Create main layout
-        main_layout = gui.Vert(0, gui.Margins(em, em, em, em))
+        main_layout = gui.Vert(0, gui.Margins(0, 0, 0, 0))
         
         # Create tabbed interface
         self.tabs = gui.TabControl()
@@ -85,14 +85,24 @@ class RPLidarViewerApp:
         self.tabs.add_tab("Scan Control", scan_tab)
         print("[DEBUG] Scan control tab added")
         
-        # Tab 2: Visualization
-        print("[DEBUG] Creating visualization tab...")
-        viz_tab = self._create_visualization_tab(em)
-        print("[DEBUG] Visualization tab created, adding to tabs...")
-        self.tabs.add_tab("Visualization", viz_tab)
+        # Tab 2: Visualization CONTROLS ONLY (no SceneWidget inside)
+        print("[DEBUG] Creating visualization controls...")
+        viz_controls = self._create_visualization_controls(em)
+        print("[DEBUG] Visualization controls created, adding to tabs...")
+        self.tabs.add_tab("Visualization", viz_controls)
         print("[DEBUG] Visualization tab added")
         
+        # Add TabControl to main layout
         main_layout.add_child(self.tabs)
+        
+        # Create SceneWidget DIRECTLY in main layout (not nested in tabs!)
+        # This is CRITICAL - SceneWidget mouse breaks when inside layouts (Issue #5268)
+        print("[DEBUG] Creating SceneWidget OUTSIDE tab structure...")
+        self._create_scene_widget()
+        
+        # Add SceneWidget directly - it will expand to fill remaining space
+        main_layout.add_child(self.scene_widget)
+        print("[DEBUG] SceneWidget added directly to main layout")
         
         self.window.add_child(main_layout)
         
@@ -176,16 +186,16 @@ class RPLidarViewerApp:
         
         return tab
     
-    def _create_visualization_tab(self, em: float) -> gui.Widget:
-        """Create the visualization tab."""
-        print("[DEBUG] _create_visualization_tab called")
+    def _create_visualization_controls(self, em: float) -> gui.Widget:
+        """Create the visualization control panel (NO SceneWidget - that's added directly)."""
+        print("[DEBUG] _create_visualization_controls called")
         try:
-            # Use a vertical layout with proper spacing
-            tab = gui.Vert(0, gui.Margins(0, 0, 0, 0))
-            print("[DEBUG] Tab container created")
+            # Vertical layout for controls
+            controls = gui.Vert(0.5 * em, gui.Margins(em, em, em, em))
+            print("[DEBUG] Controls container created")
             
-            # Top control bar (fixed height)
-            control_bar = gui.Horiz(0.5 * em, gui.Margins(em, em, em, em))
+            # Top control bar
+            control_bar = gui.Horiz(0.5 * em, gui.Margins(0, 0, 0, 0))
             
             load_btn = gui.Button("Load File...")
             load_btn.set_on_clicked(self._on_load_file)
@@ -205,32 +215,11 @@ class RPLidarViewerApp:
             self.point_size_slider.set_on_value_changed(self._on_point_size_changed)
             control_bar.add_child(self.point_size_slider)
             
-            tab.add_child(control_bar)
+            controls.add_child(control_bar)
             print("[DEBUG] Control bar added")
             
-            # 3D scene widget (should expand to fill available space)
-            print("[DEBUG] Creating SceneWidget...")
-            self.scene_widget = gui.SceneWidget()
-            self.scene_widget.scene = rendering.Open3DScene(self.window.renderer)
-            self.scene_widget.scene.set_background(config.BACKGROUND_COLOR)
-            
-            # Enable axes (no lighting needed for unlit shader)
-            self.scene_widget.scene.show_axes(True)
-            print("[DEBUG] SceneWidget created and configured")
-            
-            # Set up default camera view
-            bounds = o3d.geometry.AxisAlignedBoundingBox(
-                min_bound=np.array([-1, -1, -1], dtype=np.float32), 
-                max_bound=np.array([1, 1, 1], dtype=np.float32)
-            )
-            self.scene_widget.setup_camera(60.0, bounds, np.array([0, 0, 0], dtype=np.float32))
-            
-            # Add scene widget - this will expand to fill space
-            tab.add_child(self.scene_widget)
-            print("[DEBUG] SceneWidget added to tab")
-            
-            # Info panel at bottom (fixed height)
-            info_panel = gui.Vert(0, gui.Margins(em, em, em, em))
+            # Info panel
+            info_panel = gui.Vert(0, gui.Margins(0, em, 0, 0))
             
             self.info_label = gui.Label("No point cloud loaded")
             info_panel.add_child(self.info_label)
@@ -238,15 +227,41 @@ class RPLidarViewerApp:
             self.viz_status_label = gui.Label("Status: Ready")
             info_panel.add_child(self.viz_status_label)
             
-            tab.add_child(info_panel)
+            controls.add_child(info_panel)
+            controls.add_stretch()
             
-            print("[DEBUG] Visualization tab created successfully")
-            return tab
+            print("[DEBUG] Visualization controls created successfully")
+            return controls
         except Exception as e:
-            print(f"[DEBUG] ERROR in _create_visualization_tab: {e}")
+            print(f"[DEBUG] ERROR in _create_visualization_controls: {e}")
             import traceback
             traceback.print_exc()
             raise
+    
+    def _create_scene_widget(self):
+        """Create SceneWidget directly (NO layout nesting - fixes Issue #5268)."""
+        print("[DEBUG] Creating SceneWidget...")
+        self.scene_widget = gui.SceneWidget()
+        self.scene_widget.scene = rendering.Open3DScene(self.window.renderer)
+        self.scene_widget.scene.set_background(config.BACKGROUND_COLOR)
+        
+        # Enable axes (no lighting needed for unlit shader)
+        self.scene_widget.scene.show_axes(True)
+        print("[DEBUG] SceneWidget created and configured")
+        
+        # Set up default camera view
+        bounds = o3d.geometry.AxisAlignedBoundingBox(
+            min_bound=np.array([-1, -1, -1], dtype=np.float32), 
+            max_bound=np.array([1, 1, 1], dtype=np.float32)
+        )
+        self.scene_widget.setup_camera(60.0, bounds, np.array([0, 0, 0], dtype=np.float32))
+        
+        # Set view controls for mouse interaction
+        self.scene_widget.set_view_controls(gui.SceneWidget.Controls.ROTATE_CAMERA)
+        
+        # Start hidden (will be shown when Visualization tab is selected)
+        self.scene_widget.visible = False
+        print("[DEBUG] SceneWidget camera and controls configured")
     
     def _on_close(self):
         """Handle window close event."""
@@ -266,7 +281,15 @@ class RPLidarViewerApp:
         tab_names = ["Scan Control", "Visualization"]
         if idx < len(tab_names):
             print(f"[DEBUG] Now viewing: {tab_names[idx]} tab")
-            # Note: Don't call post_redraw here - let the tab content handle its own rendering
+            
+            # Show SceneWidget only when Visualization tab is selected (index 1)
+            if hasattr(self, 'scene_widget'):
+                if idx == 1:  # Visualization tab
+                    self.scene_widget.visible = True
+                    print("[DEBUG] SceneWidget visible")
+                else:
+                    self.scene_widget.visible = False
+                    print("[DEBUG] SceneWidget hidden")
     
     def _on_script_2d_checked(self, checked):
         """Handle 2D script checkbox."""
