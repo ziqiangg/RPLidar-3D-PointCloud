@@ -14,8 +14,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 SCAN_2D_CSV = os.path.join(DATA_DIR, "scan.csv")
 SCAN_2D_PLY = os.path.join(DATA_DIR, "scan.ply")
-SCAN_3D_CSV = os.path.join(BASE_DIR, "scan_3d.csv")
-SCAN_3D_PLY = os.path.join(BASE_DIR, "scan_3d.ply")
+SCAN_3D_CSV = os.path.join(DATA_DIR, "xyz_scan.csv")
+SCAN_3D_PLY = os.path.join(DATA_DIR, "xyz_scan.ply")
 
 # Visualization Settings
 POINT_SIZE = 2.0

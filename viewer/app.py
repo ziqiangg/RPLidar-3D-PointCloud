@@ -55,6 +55,8 @@ class RPLidarViewerApp:
         self.current_file = None
         self.current_pcd = None  # Store loaded point cloud
         self.point_size = config.POINT_SIZE
+        self.is_3d_scanning = False  # Track if 3D scan is actively scanning
+        self.is_first_3d_angle = False  # Track if this is the first angle input for 3D scan
         
     def initialize_gui(self):
         """Initialize the Open3D GUI window and widgets."""
@@ -146,7 +148,41 @@ class RPLidarViewerApp:
         
         tab.add_fixed(em)
         
+        # 3D Scan Interactive Control (always visible for proper layout)
+        self.scan_3d_panel = gui.CollapsableVert("3D Scan Control (Interactive)", 0.25 * em, gui.Margins(em, 0, 0, 0))
+        self.scan_3d_panel.set_is_open(True)  # Always open to prevent layout overlap
+        
+        info_label = gui.Label("For 3D scans, enter servo angles (0-359) or 'q' to quit:")
+        self.scan_3d_panel.add_child(info_label)
+        
+        self.scan_3d_panel.add_fixed(em * 0.5)
+        
+        # Input field and send button
+        input_horiz = gui.Horiz(0.5 * em)
+        input_horiz.add_child(gui.Label("Angle/Cmd:"))
+        
+        self.angle_input = gui.TextEdit()
+        self.angle_input.placeholder_text = "e.g., 0, 30, 90, or q"
+        input_horiz.add_child(self.angle_input)
+        
+        self.send_angle_btn = gui.Button("Send")
+        self.send_angle_btn.set_on_clicked(self._on_send_angle)
+        self.send_angle_btn.enabled = False  # Disabled until 3D scan starts
+        input_horiz.add_child(self.send_angle_btn)
+        
+        self.scan_3d_panel.add_child(input_horiz)
+        
+        # Status label for 3D scan guidance
+        self.scan_3d_status_label = gui.Label("Click 'Start Scan' to begin")
+        self.scan_3d_panel.add_child(self.scan_3d_status_label)
+        
+        tab.add_child(self.scan_3d_panel)
+        
+        tab.add_fixed(em)
+        
         # Control buttons
+        tab.add_stretch()
+        
         button_panel = gui.Horiz(0.5 * em)
         
         self.start_scan_btn = gui.Button("Start Scan")
@@ -172,7 +208,7 @@ class RPLidarViewerApp:
         
         tab.add_child(status_panel)
         
-        tab.add_stretch()
+        # Don't add stretch here - it's already added after 3D panel
         
         return tab
     
@@ -294,7 +330,15 @@ class RPLidarViewerApp:
         # Get port if specified
         port = self.port_input.text_value.strip()
         params = {"port": port} if port else {}
+        
         print(f"[DEBUG] Port: '{port}', Params: {params}")
+        
+        # For 3D scans, enable the interactive control
+        if scan_type == "3d":
+            self.send_angle_btn.enabled = True
+            self.scan_3d_status_label.text = "Insert an integer between 0-359 or 'q' to finish."
+            self.is_3d_scanning = False
+            self.is_first_3d_angle = True  # Mark that we're waiting for the first angle
         
         # Disable start button, enable stop button
         print("[DEBUG] Disabling start button, enabling stop button")
@@ -312,6 +356,96 @@ class RPLidarViewerApp:
         self.scan_controller.stop_scan()
         self.start_scan_btn.enabled = True
         self.stop_scan_btn.enabled = False
+        self.send_angle_btn.enabled = False  # Disable interactive control
+        self.is_3d_scanning = False
+        self.is_first_3d_angle = False
+        self.scan_3d_status_label.text = "Scan stopped"
+    
+    def _on_send_angle(self):
+        """Handle send angle button click for 3D scans."""
+        angle_text = self.angle_input.text_value.strip()
+        print(f"[DEBUG] Sending angle/command: {angle_text}")
+        
+        if not angle_text:
+            self.scan_3d_status_label.text = "Please enter an angle (0-359) or 'q'"
+            return
+        
+        # Handle 'q' to quit
+        if angle_text.lower() == 'q':
+            # If it's the first angle, we need to skip the initial prompt first
+            if self.is_first_3d_angle:
+                self.scan_controller.send_input('n')  # Skip initial scan prompt
+                import time
+                time.sleep(0.1)
+            self.scan_controller.send_input('q')
+            self.scan_3d_status_label.text = "Finishing scan..."
+            self.angle_input.text_value = ""
+            self.is_3d_scanning = False
+            self.is_first_3d_angle = False
+            return
+        
+        # Validate angle
+        try:
+            angle_val = int(angle_text)
+            if not (0 <= angle_val <= 359):
+                self.scan_3d_status_label.text = "Error: Angle must be 0-359"
+                return
+        except ValueError:
+            self.scan_3d_status_label.text = f"Error: '{angle_text}' is not a valid angle"
+            return
+        
+        # Handle first angle input (script is at "Start first scan at 0 deg?" prompt)
+        if self.is_first_3d_angle:
+            self.is_first_3d_angle = False
+            
+            if angle_val == 0:
+                # User wants to scan at 0 - just confirm
+                print(f"[DEBUG] First scan at 0 deg - sending 'y' to confirm")
+                self.scan_controller.send_input('y')
+                self.is_3d_scanning = True
+                self.scan_3d_status_label.text = "Scan in progress..."
+            else:
+                # User wants to scan at different angle - skip 0, set angle, confirm
+                print(f"[DEBUG] First scan at {angle_val} deg - skipping 0, setting angle, confirming")
+                
+                import threading
+                def first_angle_setup():
+                    import time
+                    # Skip the "Start first scan at 0?" prompt
+                    self.scan_controller.send_input('n')
+                    time.sleep(0.2)
+                    # Send the desired angle
+                    self.scan_controller.send_input(angle_text)
+                    time.sleep(0.2)
+                    # Confirm scanning at that angle
+                    self.scan_controller.send_input('y')
+                    self.is_3d_scanning = True
+                    def update_status():
+                        self.scan_3d_status_label.text = "Scan in progress..."
+                    gui.Application.instance.post_to_main_thread(self.window, update_status)
+                
+                threading.Thread(target=first_angle_setup, daemon=True).start()
+        else:
+            # Subsequent angles: send angle, then auto-confirm
+            print(f"[DEBUG] Sending angle {angle_val}")
+            self.scan_controller.send_input(angle_text)  # Send angle to "Next angle" prompt
+            
+            # Auto-confirm readiness for next scan after a brief delay
+            import threading
+            def auto_confirm():
+                import time
+                time.sleep(0.5)  # Wait for script to prompt for readiness
+                print("[DEBUG] Auto-sending 'y' to confirm scan")
+                self.scan_controller.send_input('y')
+                self.is_3d_scanning = True
+                def update_status():
+                    self.scan_3d_status_label.text = "Scan in progress..."
+                gui.Application.instance.post_to_main_thread(self.window, update_status)
+            
+            threading.Thread(target=auto_confirm, daemon=True).start()
+        
+        # Clear input field
+        self.angle_input.text_value = ""
     
     def _on_scan_status(self, status: str, message: str):
         """Callback for scan status updates."""
@@ -321,10 +455,20 @@ class RPLidarViewerApp:
             if self.scan_status_label:
                 self.scan_status_label.text = f"Status: {status} - {message}"
             
+            # For 3D scans, detect scan completion and prompt for next angle
+            if self.is_3d_scanning and "SCAN COMPLETE" in message:
+                self.is_3d_scanning = False
+                self.scan_3d_status_label.text = "Scan done. Insert an integer between 0-359 or 'q' to finish."
+            
             if status in ["completed", "error", "stopped"]:
                 print(f"[DEBUG] Scan finished, re-enabling buttons")
                 self.start_scan_btn.enabled = True
                 self.stop_scan_btn.enabled = False
+                self.send_angle_btn.enabled = False  # Disable interactive control
+                self.is_3d_scanning = False
+                self.is_first_3d_angle = False
+                if self.scan_3d_status_label:
+                    self.scan_3d_status_label.text = "Scan complete."
         
         gui.Application.instance.post_to_main_thread(self.window, update)
     

@@ -26,6 +26,7 @@ class ScanController:
         self.scan_thread: Optional[threading.Thread] = None
         self.status_callback: Optional[Callable] = None
         self.completion_callback: Optional[Callable] = None
+        self.current_scan_type: Optional[str] = None
         
         # Get Python executable from current environment
         self.python_executable = sys.executable
@@ -56,7 +57,6 @@ class ScanController:
             scan_type: "2d" or "3d"
             params: Optional parameters including:
                 - port: Serial port (e.g., "COM3", "/dev/ttyUSB0")
-                - angles: List of angles for 3D scan (future use)
         """
         if self.scan_running:
             self._update_status("error", "A scan is already running")
@@ -83,7 +83,7 @@ class ScanController:
         cmd = [self.python_executable, script_path]
         
         # Add port if specified
-        if "port" in params:
+        if "port" in params and params["port"]:
             cmd.append(params["port"])
         
         # Start scan in a separate thread
@@ -96,20 +96,56 @@ class ScanController:
         
         return True
     
+    def send_input(self, text: str):
+        """
+        Send input to the running scan process.
+        
+        Args:
+            text: Input text to send (e.g., servo angle or 'q')
+        """
+        if self.scan_running and self.scan_process and self.scan_process.stdin:
+            try:
+                self.scan_process.stdin.write(text + "\n")
+                self.scan_process.stdin.flush()
+                print(f"[SCAN] Sent input: {text}")
+            except Exception as e:
+                print(f"[SCAN] Error sending input: {e}")
+                self._update_status("error", f"Error sending input: {e}")
+    
     def stop_scan(self):
         """Stop the currently running scan."""
         if self.scan_running and self.scan_process:
             try:
+                print("[SCAN] Stopping scan...")
+                # For interactive 3D scans, send 'q' first
+                if self.current_scan_type == config.SCAN_TYPE_3D and self.scan_process.stdin:
+                    try:
+                        self.send_input('q')
+                        # Wait briefly for graceful exit
+                        self.scan_process.wait(timeout=3)
+                        self._update_status("stopped", "Scan stopped by user")
+                        return
+                    except subprocess.TimeoutExpired:
+                        pass
+                
+                # Try graceful termination
                 self.scan_process.terminate()
-                self.scan_process.wait(timeout=5)
-                self._update_status("stopped", "Scan stopped by user")
-            except subprocess.TimeoutExpired:
-                self.scan_process.kill()
-                self._update_status("stopped", "Scan forcefully stopped")
+                try:
+                    self.scan_process.wait(timeout=2)
+                    self._update_status("stopped", "Scan stopped by user")
+                except subprocess.TimeoutExpired:
+                    # Force kill if terminate didn't work
+                    print("[SCAN] Process not responding, force killing...")
+                    self.scan_process.kill()
+                    self.scan_process.wait(timeout=2)
+                    self._update_status("stopped", "Scan forcefully stopped")
             except Exception as e:
+                print(f"[SCAN] Error stopping scan: {e}")
                 self._update_status("error", f"Error stopping scan: {e}")
             finally:
                 self.scan_running = False
+                self.scan_process = None
+                self.current_scan_type = None
     
     def is_running(self) -> bool:
         """Check if a scan is currently running."""
@@ -125,16 +161,19 @@ class ScanController:
             output_file: Expected output file path
         """
         self.scan_running = True
+        self.current_scan_type = scan_type
         self._update_status("started", f"Starting {scan_type} scan...")
         
         try:
-            # Run the scan script
+            # Run the scan script (enable stdin for 3D interactive mode)
             self.scan_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # Merge stderr into stdout for unified output
+                stdin=subprocess.PIPE if scan_type == config.SCAN_TYPE_3D else None,
                 text=True,
-                bufsize=1
+                bufsize=1,
+                universal_newlines=True
             )
             
             # Stream output
@@ -156,9 +195,8 @@ class ScanController:
                     if self.completion_callback:
                         self.completion_callback(scan_type, False, "")
             else:
-                # Scan failed
-                stderr_output = self.scan_process.stderr.read()
-                self._update_status("error", f"Scan failed: {stderr_output}")
+                # Scan failed or was terminated
+                self._update_status("error", f"Scan exited with code {return_code}")
                 if self.completion_callback:
                     self.completion_callback(scan_type, False, "")
         
@@ -170,6 +208,7 @@ class ScanController:
         finally:
             self.scan_running = False
             self.scan_process = None
+            self.current_scan_type = None
     
     def _update_status(self, status: str, message: str):
         """Update status via callback."""

@@ -83,7 +83,7 @@ def validate_scan_quality(scan, min_resolution=MIN_ANGLE_RESOLUTION, min_coverag
     # Validate with relaxed criteria for sparse scans
     is_valid = coverage >= min_coverage and max_gap <= RELAXED_MAX_GAP
     
-    message = f"Coverage: {coverage*100:.1f}%, Max gap: {max_gap:.1f}°, Points: {len(angles)}"
+    message = f"Coverage: {coverage*100:.1f}%, Max gap: {max_gap:.1f} deg, Points: {len(angles)}"
     
     return is_valid, coverage, max_gap, len(angles), message
 
@@ -156,26 +156,26 @@ def main():
             # Accept if we meet quality requirements
             if is_valid:
                 scan = merged_scan
-                print(f"✓ Quality achieved! Merged {len(collected_scans)} scan(s)", flush=True)
+                print(f"[OK] Quality achieved! Merged {len(collected_scans)} scan(s)", flush=True)
                 break
             
             # Early exit if coverage plateaued for 3 consecutive scans
             if plateau_count >= 3 and len(collected_scans) >= 3:
                 scan = merged_scan
-                print(f"⚠ Coverage plateaued at {coverage*100:.1f}% after {len(collected_scans)} scans.", flush=True)
-                print(f"   Likely hardware limitation or obstruction. Using current result.", flush=True)
+                print(f"[!] Coverage plateaued at {coverage*100:.1f}% after {len(collected_scans)} scans.", flush=True)
+                print(f"    Likely hardware limitation or obstruction. Using current result.", flush=True)
                 break
             
             # Stop collecting if we've gathered enough scans
             if len(collected_scans) >= MAX_SCANS_TO_MERGE:
                 scan = merged_scan
-                print(f"⚠ Max scans reached ({MAX_SCANS_TO_MERGE}). Using merged result.", flush=True)
+                print(f"[!] Max scans reached ({MAX_SCANS_TO_MERGE}). Using merged result.", flush=True)
                 break
             
             # Timeout after 15 seconds
             if elapsed > 15:
                 scan = merged_scan if collected_scans else s
-                print(f"⚠ Timeout reached. Using best available ({len(collected_scans)} scans merged)", flush=True)
+                print(f"[!] Timeout reached. Using best available ({len(collected_scans)} scans merged)", flush=True)
                 break
 
         if not scan:
@@ -188,15 +188,15 @@ def main():
         print(f"{'='*60}", flush=True)
         print(f"  Scans merged: {len(collected_scans)}", flush=True)
         print(f"  {message}", flush=True)
-        print(f"  Requirements: ≥{MIN_COVERAGE*100:.0f}% coverage, ≤{RELAXED_MAX_GAP:.0f}° max gap", flush=True)
-        print(f"  Valid quality: {'YES ✓' if is_valid else 'NO ✗'}", flush=True)
+        print(f"  Requirements: >={MIN_COVERAGE*100:.0f}% coverage, <={RELAXED_MAX_GAP:.0f} deg max gap", flush=True)
+        print(f"  Valid quality: {'YES [OK]' if is_valid else 'NO [X]'}", flush=True)
         if not is_valid:
             print(f"  ", flush=True)
             if coverage < MIN_COVERAGE:
                 shortfall = (MIN_COVERAGE - coverage) * 360
-                print(f"  ⚠ Coverage {shortfall:.0f}° short of target", flush=True)
+                print(f"  [!] Coverage {shortfall:.0f} deg short of target", flush=True)
             if max_gap > RELAXED_MAX_GAP:
-                print(f"  ⚠ Max gap {max_gap:.1f}° exceeds {RELAXED_MAX_GAP:.0f}° limit", flush=True)
+                print(f"  [!] Max gap {max_gap:.1f} deg exceeds {RELAXED_MAX_GAP:.0f} deg limit", flush=True)
             print(f"  ", flush=True)
             print(f"  Possible solutions:", flush=True)
             print(f"     - Increase MAX_SCANS_TO_MERGE (currently {MAX_SCANS_TO_MERGE})", flush=True)
