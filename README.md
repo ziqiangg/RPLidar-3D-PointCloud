@@ -9,6 +9,9 @@ Cross-platform Python toolkit for capturing and processing RPLidar scans into 2D
 # Create virtual environment with Python 3.12
 python3.12 -m venv venv
 
+# if you have multiple python versions installed use
+py -3.12 -m venv venv
+
 .\venv\Scripts\Activate.ps1; python --version
 
 # Activate the virtual environment
@@ -20,6 +23,9 @@ source venv/bin/activate
 
 ### 2. Install Dependencies
 ```bash
+# Upgrade pip
+python.exe -m pip install --upgrade pip
+
 pip install -r requirements.txt
 ```
 
