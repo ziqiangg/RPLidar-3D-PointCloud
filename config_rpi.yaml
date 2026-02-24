@@ -10,8 +10,8 @@ device:
   client_id: "rplidar_scanner_rpi"
   default_port: "/dev/ttyUSB0"  # Linux default
   
-scripts:
-  scan_2d: "./dump_one_scan.py"
+# scripts:
+#   scan_2d: "./dump_one_scan.py"
   
 data:
   output_dir: "./data"

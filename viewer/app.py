@@ -55,8 +55,6 @@ class RPLidarViewerApp:
         self.current_file = None
         self.current_pcd = None  # Store loaded point cloud
         self.point_size = config.POINT_SIZE
-        self.is_3d_scanning = False  # Track if 3D scan is actively scanning
-        self.is_first_3d_angle = False  # Track if this is the first angle input for 3D scan
         
     def initialize_gui(self):
         """Initialize the Open3D GUI window and widgets."""
@@ -118,16 +116,10 @@ class RPLidarViewerApp:
         
         script_2d_checkbox = gui.Checkbox("dump_one_scan.py - Single 2D 360° scan")
         script_2d_checkbox.checked = True
-        script_2d_checkbox.set_on_checked(lambda checked: self._on_script_2d_checked(checked))
+        script_2d_checkbox.enabled = False  # Only one option, keep it checked
         script_container.add_child(script_2d_checkbox)
         
-        script_3d_checkbox = gui.Checkbox("xyzscan_servoless.py - 3D scan (manual servo control)")
-        script_3d_checkbox.checked = False
-        script_3d_checkbox.set_on_checked(lambda checked: self._on_script_3d_checked(checked))
-        script_container.add_child(script_3d_checkbox)
-        
         self.script_2d_checkbox = script_2d_checkbox
-        self.script_3d_checkbox = script_3d_checkbox
         
         script_panel.add_child(script_container)
         tab.add_child(script_panel)
@@ -145,38 +137,6 @@ class RPLidarViewerApp:
         
         port_panel.add_child(port_horiz)
         tab.add_child(port_panel)
-        
-        tab.add_fixed(em)
-        
-        # 3D Scan Interactive Control (always visible for proper layout)
-        self.scan_3d_panel = gui.CollapsableVert("3D Scan Control (Interactive)", 0.25 * em, gui.Margins(em, 0, 0, 0))
-        self.scan_3d_panel.set_is_open(True)  # Always open to prevent layout overlap
-        
-        info_label = gui.Label("For 3D scans, enter servo angles (0-359) or 'q' to quit:")
-        self.scan_3d_panel.add_child(info_label)
-        
-        self.scan_3d_panel.add_fixed(em * 0.5)
-        
-        # Input field and send button
-        input_horiz = gui.Horiz(0.5 * em)
-        input_horiz.add_child(gui.Label("Angle/Cmd:"))
-        
-        self.angle_input = gui.TextEdit()
-        self.angle_input.placeholder_text = "e.g., 0, 30, 90, or q"
-        input_horiz.add_child(self.angle_input)
-        
-        self.send_angle_btn = gui.Button("Send")
-        self.send_angle_btn.set_on_clicked(self._on_send_angle)
-        self.send_angle_btn.enabled = False  # Disabled until 3D scan starts
-        input_horiz.add_child(self.send_angle_btn)
-        
-        self.scan_3d_panel.add_child(input_horiz)
-        
-        # Status label for 3D scan guidance
-        self.scan_3d_status_label = gui.Label("Click 'Start Scan' to begin")
-        self.scan_3d_panel.add_child(self.scan_3d_status_label)
-        
-        tab.add_child(self.scan_3d_panel)
         
         tab.add_fixed(em)
         
@@ -239,6 +199,11 @@ class RPLidarViewerApp:
             clear_btn = gui.Button("Clear")
             clear_btn.set_on_clicked(self._on_clear)
             control_bar.add_child(clear_btn)
+            
+            self.save_ply_btn = gui.Button("Save PLY...")
+            self.save_ply_btn.set_on_clicked(self._on_save_ply)
+            self.save_ply_btn.enabled = False  # Disabled until point cloud loaded
+            control_bar.add_child(self.save_ply_btn)
             
             control_bar.add_stretch()
             
@@ -304,18 +269,6 @@ class RPLidarViewerApp:
             print(f"[DEBUG] Error during cleanup: {e}")
         return True
     
-    def _on_script_2d_checked(self, checked):
-        """Handle 2D script checkbox."""
-        print(f"[DEBUG] 2D script checkbox: {checked}")
-        if checked:
-            self.script_3d_checkbox.checked = False
-    
-    def _on_script_3d_checked(self, checked):
-        """Handle 3D script checkbox."""
-        print(f"[DEBUG] 3D script checkbox: {checked}")
-        if checked:
-            self.script_2d_checkbox.checked = False
-    
     def _on_start_scan(self):
         """Handle start scan button click."""
         print("[DEBUG] Start scan button clicked")
@@ -323,8 +276,8 @@ class RPLidarViewerApp:
             print("[DEBUG] Scan already running, ignoring")
             return
         
-        # Get selected script based on checkboxes
-        scan_type = "2d" if self.script_2d_checkbox.checked else "3d"
+        # Always 2D scan (only option)
+        scan_type = "2d"
         print(f"[DEBUG] Selected scan type: {scan_type}")
         
         # Get port if specified
@@ -332,13 +285,6 @@ class RPLidarViewerApp:
         params = {"port": port} if port else {}
         
         print(f"[DEBUG] Port: '{port}', Params: {params}")
-        
-        # For 3D scans, enable the interactive control
-        if scan_type == "3d":
-            self.send_angle_btn.enabled = True
-            self.scan_3d_status_label.text = "Insert an integer between 0-359 or 'q' to finish."
-            self.is_3d_scanning = False
-            self.is_first_3d_angle = True  # Mark that we're waiting for the first angle
         
         # Disable start button, enable stop button
         print("[DEBUG] Disabling start button, enabling stop button")
@@ -356,96 +302,6 @@ class RPLidarViewerApp:
         self.scan_controller.stop_scan()
         self.start_scan_btn.enabled = True
         self.stop_scan_btn.enabled = False
-        self.send_angle_btn.enabled = False  # Disable interactive control
-        self.is_3d_scanning = False
-        self.is_first_3d_angle = False
-        self.scan_3d_status_label.text = "Scan stopped"
-    
-    def _on_send_angle(self):
-        """Handle send angle button click for 3D scans."""
-        angle_text = self.angle_input.text_value.strip()
-        print(f"[DEBUG] Sending angle/command: {angle_text}")
-        
-        if not angle_text:
-            self.scan_3d_status_label.text = "Please enter an angle (0-359) or 'q'"
-            return
-        
-        # Handle 'q' to quit
-        if angle_text.lower() == 'q':
-            # If it's the first angle, we need to skip the initial prompt first
-            if self.is_first_3d_angle:
-                self.scan_controller.send_input('n')  # Skip initial scan prompt
-                import time
-                time.sleep(0.1)
-            self.scan_controller.send_input('q')
-            self.scan_3d_status_label.text = "Finishing scan..."
-            self.angle_input.text_value = ""
-            self.is_3d_scanning = False
-            self.is_first_3d_angle = False
-            return
-        
-        # Validate angle
-        try:
-            angle_val = int(angle_text)
-            if not (0 <= angle_val <= 359):
-                self.scan_3d_status_label.text = "Error: Angle must be 0-359"
-                return
-        except ValueError:
-            self.scan_3d_status_label.text = f"Error: '{angle_text}' is not a valid angle"
-            return
-        
-        # Handle first angle input (script is at "Start first scan at 0 deg?" prompt)
-        if self.is_first_3d_angle:
-            self.is_first_3d_angle = False
-            
-            if angle_val == 0:
-                # User wants to scan at 0 - just confirm
-                print(f"[DEBUG] First scan at 0 deg - sending 'y' to confirm")
-                self.scan_controller.send_input('y')
-                self.is_3d_scanning = True
-                self.scan_3d_status_label.text = "Scan in progress..."
-            else:
-                # User wants to scan at different angle - skip 0, set angle, confirm
-                print(f"[DEBUG] First scan at {angle_val} deg - skipping 0, setting angle, confirming")
-                
-                import threading
-                def first_angle_setup():
-                    import time
-                    # Skip the "Start first scan at 0?" prompt
-                    self.scan_controller.send_input('n')
-                    time.sleep(0.2)
-                    # Send the desired angle
-                    self.scan_controller.send_input(angle_text)
-                    time.sleep(0.2)
-                    # Confirm scanning at that angle
-                    self.scan_controller.send_input('y')
-                    self.is_3d_scanning = True
-                    def update_status():
-                        self.scan_3d_status_label.text = "Scan in progress..."
-                    gui.Application.instance.post_to_main_thread(self.window, update_status)
-                
-                threading.Thread(target=first_angle_setup, daemon=True).start()
-        else:
-            # Subsequent angles: send angle, then auto-confirm
-            print(f"[DEBUG] Sending angle {angle_val}")
-            self.scan_controller.send_input(angle_text)  # Send angle to "Next angle" prompt
-            
-            # Auto-confirm readiness for next scan after a brief delay
-            import threading
-            def auto_confirm():
-                import time
-                time.sleep(0.5)  # Wait for script to prompt for readiness
-                print("[DEBUG] Auto-sending 'y' to confirm scan")
-                self.scan_controller.send_input('y')
-                self.is_3d_scanning = True
-                def update_status():
-                    self.scan_3d_status_label.text = "Scan in progress..."
-                gui.Application.instance.post_to_main_thread(self.window, update_status)
-            
-            threading.Thread(target=auto_confirm, daemon=True).start()
-        
-        # Clear input field
-        self.angle_input.text_value = ""
     
     def _on_scan_status(self, status: str, message: str):
         """Callback for scan status updates."""
@@ -455,20 +311,10 @@ class RPLidarViewerApp:
             if self.scan_status_label:
                 self.scan_status_label.text = f"Status: {status} - {message}"
             
-            # For 3D scans, detect scan completion and prompt for next angle
-            if self.is_3d_scanning and "SCAN COMPLETE" in message:
-                self.is_3d_scanning = False
-                self.scan_3d_status_label.text = "Scan done. Insert an integer between 0-359 or 'q' to finish."
-            
             if status in ["completed", "error", "stopped"]:
                 print(f"[DEBUG] Scan finished, re-enabling buttons")
                 self.start_scan_btn.enabled = True
                 self.stop_scan_btn.enabled = False
-                self.send_angle_btn.enabled = False  # Disable interactive control
-                self.is_3d_scanning = False
-                self.is_first_3d_angle = False
-                if self.scan_3d_status_label:
-                    self.scan_3d_status_label.text = "Scan complete."
         
         gui.Application.instance.post_to_main_thread(self.window, update)
     
@@ -544,6 +390,7 @@ class RPLidarViewerApp:
                 self._update_info_label("No point cloud loaded")
                 self._update_viz_status("Cleared")
                 self.visualize_btn.enabled = False
+                self.save_ply_btn.enabled = False
                 print("[DEBUG] Clear complete")
                 
             except Exception as e:
@@ -553,6 +400,79 @@ class RPLidarViewerApp:
         
         # Post to main thread to ensure thread-safe GUI updates
         gui.Application.instance.post_to_main_thread(self.window, clear_operation)
+    
+    def _on_save_ply(self):
+        """Handle save PLY button click - save point cloud with timestamp to persistent folder."""
+        print("[DEBUG] Save PLY button clicked")
+        
+        if not self.current_pcd:
+            print("[DEBUG] No point cloud loaded to save")
+            self._update_viz_status("Error: No point cloud loaded")
+            return
+        
+        try:
+            # Ensure persistent directory exists
+            if not os.path.exists(config.PERSISTENT_DIR):
+                os.makedirs(config.PERSISTENT_DIR)
+                print(f"[DEBUG] Created persistent directory: {config.PERSISTENT_DIR}")
+            
+            # Generate timestamped filename
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_filename = f"scan_{timestamp}.ply"
+            
+            # CRITICAL FIX: Run tkinter dialog in separate thread to avoid crash
+            selected_file = [None]  # Use list to store result from thread
+            
+            def ask_save_file():
+                """Run file dialog in separate thread."""
+                root = tk.Tk()
+                root.withdraw()  # Hide the root window
+                root.attributes('-topmost', True)  # Bring dialog to front
+                
+                print("[DEBUG] Opening save file dialog...")
+                filename = filedialog.asksaveasfilename(
+                    parent=root,
+                    title="Save Point Cloud",
+                    initialdir=config.PERSISTENT_DIR,
+                    initialfile=default_filename,
+                    defaultextension=".ply",
+                    filetypes=[
+                        ("PLY files", "*.ply"),
+                        ("All files", "*.*")
+                    ]
+                )
+                
+                root.destroy()  # Clean up Tk window
+                selected_file[0] = filename  # Store result
+            
+            # Run dialog in thread and wait for completion
+            dialog_thread = threading.Thread(target=ask_save_file)
+            dialog_thread.start()
+            dialog_thread.join()  # Wait for thread to complete
+            
+            filename = selected_file[0]
+            
+            if filename:
+                print(f"[DEBUG] Saving to: {filename}")
+                
+                # Save the point cloud
+                success = o3d.io.write_point_cloud(filename, self.current_pcd)
+                
+                if success:
+                    print(f"[INFO] Point cloud saved to: {filename}")
+                    self._update_viz_status(f"Saved: {os.path.basename(filename)}")
+                else:
+                    print(f"[ERROR] Failed to save point cloud to: {filename}")
+                    self._update_viz_status("Error: Failed to save file")
+            else:
+                print("[DEBUG] Save dialog cancelled")
+                
+        except Exception as e:
+            print(f"[DEBUG] Save error: {e}")
+            self._update_viz_status(f"Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
     
     def _on_point_size_changed(self, value):
         """Handle point size slider change."""
@@ -606,8 +526,9 @@ class RPLidarViewerApp:
             self._update_info_label(info_text)
             self._update_viz_status(f"Loaded: {filename}")
             
-            # Enable visualize button
+            # Enable visualize and save buttons
             self.visualize_btn.enabled = True
+            self.save_ply_btn.enabled = True
             
             print("[DEBUG] Load complete - click 'Visualize' to view")
         else:
