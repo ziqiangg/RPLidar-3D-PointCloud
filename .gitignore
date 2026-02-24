@@ -19,3 +19,8 @@ ENV/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Config Files ***DO NOT PUSH SENSITIVE INFORMATION***
+config_rpi.yaml
+config_laptop.yaml
+
