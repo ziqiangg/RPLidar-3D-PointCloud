@@ -10,5 +10,8 @@ pyserial
 # MQTT communication
 paho-mqtt
 
+# Configuration parsing
+pyyaml
+
 # Numerical operations
 numpy
