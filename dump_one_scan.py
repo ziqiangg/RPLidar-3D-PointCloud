@@ -88,164 +88,224 @@ def validate_scan_quality(scan, min_resolution=MIN_ANGLE_RESOLUTION, min_coverag
     return is_valid, coverage, max_gap, len(angles), message
 
 
-def main():
-    # Auto-detect port or use OS-appropriate default
-    port = get_default_port()
+def run_scan(port="auto", output_dir="data"):
+    """
+    Execute a 2D RPLidar scan and save results to files.
     
-    # Allow command-line override: python dump_one_scan.py COM4
+    This function performs the scan without printing to stdout/stderr,
+    returning all status information in a structured dict.
+    
+    Args:
+        port: Serial port path (e.g., "/dev/ttyUSB0", "COM3") or "auto" for auto-detection
+        output_dir: Directory to save scan files (default: "data")
+    
+    Returns:
+        dict: {
+            'success': bool,          # True if scan completed successfully
+            'point_count': int,       # Number of valid points captured
+            'files': list,            # List of generated file paths
+            'error': str or None,     # Error message if failed, None if success
+            'message': str,           # Human-readable status message
+            'scan_quality': dict      # Quality metrics (coverage, max_gap, etc.)
+        }
+    """
+    try:
+        # Auto-detect port if needed
+        if port == "auto":
+            port = get_default_port()
+        
+        # Connect to LiDAR
+        lidar = RPLidar(port, baudrate=BAUD, timeout=3)
+
+        try:
+            # Get device info (no print, just verify connection)
+            info = lidar.get_info()
+            health = lidar.get_health()
+            
+            # Start motor
+            lidar.start_motor()
+            time.sleep(2)
+
+            # Scan collection parameters
+            t0 = time.time()
+            collected_scans = []
+            scan = None
+            last_coverage = 0.0
+            plateau_count = 0
+            
+            # Collect and merge scans
+            for i, s in enumerate(lidar.iter_scans(max_buf_meas=1500, min_len=50)):
+                elapsed = time.time() - t0
+                
+                # Skip empty scans
+                if not s or len(s) < 50:
+                    continue
+                
+                # Add to collection
+                collected_scans.append(s)
+                
+                # Merge all scans collected so far
+                merged_scan = merge_scans(collected_scans)
+                
+                # Validate merged scan quality
+                is_valid, coverage, max_gap, point_count, message = validate_scan_quality(merged_scan)
+                
+                # Check if coverage is plateauing
+                if abs(coverage - last_coverage) < 0.01:
+                    plateau_count += 1
+                else:
+                    plateau_count = 0
+                last_coverage = coverage
+                
+                # Accept if we meet quality requirements
+                if is_valid:
+                    scan = merged_scan
+                    break
+                
+                # Early exit if coverage plateaued
+                if plateau_count >= 3 and len(collected_scans) >= 3:
+                    scan = merged_scan
+                    break
+                
+                # Stop if max scans reached
+                if len(collected_scans) >= MAX_SCANS_TO_MERGE:
+                    scan = merged_scan
+                    break
+                
+                # Timeout after 15 seconds
+                if elapsed > 15:
+                    scan = merged_scan if collected_scans else s
+                    break
+
+            if not scan:
+                return {
+                    'success': False,
+                    'point_count': 0,
+                    'files': [],
+                    'error': 'No scan data received',
+                    'message': 'RPLidar did not return any scan data',
+                    'scan_quality': {}
+                }
+            
+            # Final quality assessment
+            is_valid, coverage, max_gap, point_count, message = validate_scan_quality(scan)
+            
+            # Convert to XY coordinates (meters)
+            pts = []
+            for q, ang, dist in scan:
+                if dist <= 0:
+                    continue
+                r = dist / 1000.0
+                th = math.radians(ang)
+                x = r * math.cos(th)
+                y = r * math.sin(th)
+                pts.append((q, ang, dist, x, y, 0.0))
+            
+            # Ensure output directory exists
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Write CSV file
+            csv_file = os.path.join(output_dir, "scan.csv")
+            with open(csv_file, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["quality", "angle_deg", "distance_mm", "x_m", "y_m", "z_m"])
+                w.writerows(pts)
+            
+            # Write PLY file
+            ply_file = os.path.join(output_dir, "scan.ply")
+            with open(ply_file, "w") as f:
+                f.write("ply\nformat ascii 1.0\n")
+                f.write(f"element vertex {len(pts)}\n")
+                f.write("property float x\nproperty float y\nproperty float z\nend_header\n")
+                for _, _, _, x, y, z in pts:
+                    f.write(f"{x:.6f} {y:.6f} {z:.6f}\n")
+            
+            # Build success message
+            status_msg = f"Scan completed: {len(pts)} points"
+            if len(collected_scans) > 1:
+                status_msg += f" (merged {len(collected_scans)} scans)"
+            
+            return {
+                'success': True,
+                'point_count': len(pts),
+                'files': [csv_file, ply_file],
+                'error': None,
+                'message': status_msg,
+                'scan_quality': {
+                    'is_valid': is_valid,
+                    'coverage_percent': coverage * 100,
+                    'max_gap_degrees': max_gap,
+                    'scans_merged': len(collected_scans),
+                    'quality_message': message
+                }
+            }
+
+        finally:
+            # Always cleanup LiDAR connection
+            try:
+                lidar.stop()
+            except Exception:
+                pass
+            try:
+                lidar.stop_motor()
+            except Exception:
+                pass
+            lidar.disconnect()
+    
+    except Exception as e:
+        # Return error result
+        return {
+            'success': False,
+            'point_count': 0,
+            'files': [],
+            'error': str(e),
+            'message': f"Scan failed: {str(e)}",
+            'scan_quality': {}
+        }
+
+
+def main():
+    """
+    CLI wrapper for run_scan().
+    Maintains backward compatibility for command-line usage.
+    """
+    # Auto-detect port or use command-line argument
+    port = get_default_port()
     if len(sys.argv) > 1:
         port = sys.argv[1]
     
     print(f"Using port: {port}", flush=True)
+    print("Starting scan...", flush=True)
     
-    lidar = RPLidar(port, baudrate=BAUD, timeout=3)
-
-    try:
-        info = lidar.get_info()
-        health = lidar.get_health()
-        print("Info:", info, flush=True)
-        print("Health:", health, flush=True)
-        
-        # Display scan mode info
-        print("\nNOTE: RPLidar scan density varies by model:", flush=True)
-        print("  - A1: ~360 points/scan in standard mode (0.5-1° resolution)", flush=True)
-        print("  - A2: ~4000 points/scan (vary high density)", flush=True)
-        print("  - If density is low, multiple scans will be merged automatically\n", flush=True)
-
-        print("Starting motor...", flush=True)
-        lidar.start_motor()
-        time.sleep(2)
-
-        print("Starting scan loop (waiting for first scan)...", flush=True)
-        print(f"Requirement: {MIN_COVERAGE*100:.0f}% angle coverage, max gap {RELAXED_MAX_GAP:.0f}°", flush=True)
-        print(f"Strategy: Merge up to {MAX_SCANS_TO_MERGE} scans if needed to achieve coverage", flush=True)
-        t0 = time.time()
-
-        # Collect and merge multiple scans to achieve required coverage
-        collected_scans = []
-        scan = None
-        last_coverage = 0.0
-        plateau_count = 0  # Track if coverage stops improving
-        
-        for i, s in enumerate(lidar.iter_scans(max_buf_meas=1500, min_len=50)):
-            elapsed = time.time() - t0
-            
-            # Skip empty scans
-            if not s or len(s) < 50:
-                continue
-            
-            # Add to collection
-            collected_scans.append(s)
-            
-            # Merge all scans collected so far
-            merged_scan = merge_scans(collected_scans)
-            
-            # Validate merged scan quality
-            is_valid, coverage, max_gap, point_count, message = validate_scan_quality(merged_scan)
-            
-            scan_info = f"[Single: {len(s)} pts]" if len(collected_scans) == 1 else f"[Merged: {len(collected_scans)} scans]"
-            print(f"Scan #{i}: {message} {scan_info} [{elapsed:.2f}s]", flush=True)
-            
-            # Check if coverage is plateauing
-            if abs(coverage - last_coverage) < 0.01:  # Less than 1% improvement
-                plateau_count += 1
-            else:
-                plateau_count = 0
-            last_coverage = coverage
-            
-            # Accept if we meet quality requirements
-            if is_valid:
-                scan = merged_scan
-                print(f"[OK] Quality achieved! Merged {len(collected_scans)} scan(s)", flush=True)
-                break
-            
-            # Early exit if coverage plateaued for 3 consecutive scans
-            if plateau_count >= 3 and len(collected_scans) >= 3:
-                scan = merged_scan
-                print(f"[!] Coverage plateaued at {coverage*100:.1f}% after {len(collected_scans)} scans.", flush=True)
-                print(f"    Likely hardware limitation or obstruction. Using current result.", flush=True)
-                break
-            
-            # Stop collecting if we've gathered enough scans
-            if len(collected_scans) >= MAX_SCANS_TO_MERGE:
-                scan = merged_scan
-                print(f"[!] Max scans reached ({MAX_SCANS_TO_MERGE}). Using merged result.", flush=True)
-                break
-            
-            # Timeout after 15 seconds
-            if elapsed > 15:
-                scan = merged_scan if collected_scans else s
-                print(f"[!] Timeout reached. Using best available ({len(collected_scans)} scans merged)", flush=True)
-                break
-
-        if not scan:
-            raise RuntimeError("No scan data received at all.")
-        
-        # Final quality report
-        is_valid, coverage, max_gap, point_count, message = validate_scan_quality(scan)
+    # Execute scan
+    result = run_scan(port=port, output_dir="data")
+    
+    # Display results
+    if result['success']:
         print(f"\n{'='*60}", flush=True)
-        print(f"FINAL SCAN QUALITY REPORT", flush=True)
+        print(f"SCAN COMPLETED SUCCESSFULLY", flush=True)
         print(f"{'='*60}", flush=True)
-        print(f"  Scans merged: {len(collected_scans)}", flush=True)
-        print(f"  {message}", flush=True)
-        print(f"  Requirements: >={MIN_COVERAGE*100:.0f}% coverage, <={RELAXED_MAX_GAP:.0f} deg max gap", flush=True)
-        print(f"  Valid quality: {'YES [OK]' if is_valid else 'NO [X]'}", flush=True)
-        if not is_valid:
-            print(f"  ", flush=True)
-            if coverage < MIN_COVERAGE:
-                shortfall = (MIN_COVERAGE - coverage) * 360
-                print(f"  [!] Coverage {shortfall:.0f} deg short of target", flush=True)
-            if max_gap > RELAXED_MAX_GAP:
-                print(f"  [!] Max gap {max_gap:.1f} deg exceeds {RELAXED_MAX_GAP:.0f} deg limit", flush=True)
-            print(f"  ", flush=True)
-            print(f"  Possible solutions:", flush=True)
-            print(f"     - Increase MAX_SCANS_TO_MERGE (currently {MAX_SCANS_TO_MERGE})", flush=True)
-            print(f"     - Check for physical obstructions blocking lidar", flush=True)
-            print(f"     - Verify lidar is in express/boost mode if available", flush=True)
-            print(f"  ", flush=True)
-            print(f"  Data will still be saved but may have gaps in coverage.", flush=True)
-        print(f"{'='*60}\n", flush=True)
-
-        # Convert to XY (meters)
-        pts = []
-        for q, ang, dist in scan:
-            if dist <= 0:
-                continue
-            r = dist / 1000.0
-            th = math.radians(ang)
-            x = r * math.cos(th)
-            y = r * math.sin(th)
-            pts.append((q, ang, dist, x, y, 0.0))
-
-        print(f"Writing {len(pts)} valid points (filtered from {len(scan)} total)...", flush=True)
+        print(f"  Points captured: {result['point_count']}", flush=True)
         
-        # Ensure data directory exists
-        os.makedirs("data", exist_ok=True)
-
-        with open("data/scan.csv", "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["quality", "angle_deg", "distance_mm", "x_m", "y_m", "z_m"])
-            w.writerows(pts)
-
-        with open("data/scan.ply", "w") as f:
-            f.write("ply\nformat ascii 1.0\n")
-            f.write(f"element vertex {len(pts)}\n")
-            f.write("property float x\nproperty float y\nproperty float z\nend_header\n")
-            for _, _, _, x, y, z in pts:
-                f.write(f"{x:.6f} {y:.6f} {z:.6f}\n")
-
-        print("Done: data/scan.csv + data/scan.ply", flush=True)
-
-    finally:
-        try:
-            lidar.stop()
-        except Exception:
-            pass
-        try:
-            lidar.stop_motor()
-        except Exception:
-            pass
-        lidar.disconnect()
+        quality = result['scan_quality']
+        if quality:
+            print(f"  Scans merged: {quality.get('scans_merged', 1)}", flush=True)
+            print(f"  Coverage: {quality.get('coverage_percent', 0):.1f}%", flush=True)
+            print(f"  Max gap: {quality.get('max_gap_degrees', 0):.1f}°", flush=True)
+            print(f"  Quality: {quality.get('quality_message', 'N/A')}", flush=True)
+        
+        print(f"\n  Files saved:", flush=True)
+        for file in result['files']:
+            print(f"    - {file}", flush=True)
+        print(f"{'='*60}\n", flush=True)
+    else:
+        print(f"\n{'='*60}", flush=True)
+        print(f"SCAN FAILED", flush=True)
+        print(f"{'='*60}", flush=True)
+        print(f"  Error: {result['error']}", flush=True)
+        print(f"  Message: {result['message']}", flush=True)
+        print(f"{'='*60}\n", flush=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

@@ -194,94 +194,57 @@ class RPiScannerService(MQTTClientBase):
     
     def _run_scan_2d(self, port: str) -> dict:
         """
-        Run 2D scan by importing and executing dump_one_scan logic.
+        Run 2D scan by directly importing and executing dump_one_scan.run_scan().
+        
+        No subprocess, no stdout/stderr capture - direct module import.
+        
+        Args:
+            port: Serial port ("auto" or specific port like "/dev/ttyUSB0")
         
         Returns:
-            dict with keys: success, point_count, files, error
+            dict with keys: success, point_count, files, error, message, scan_quality
         """
         try:
             # Import the scan module
-            import dump_one_scan as scan_module
+            from dump_one_scan import run_scan
             
             # Determine port
             if port == "auto":
                 from utils.port_config import get_default_port
                 port = get_default_port()
             
-            self.logger.info(f"Using port: {port}")
+            self.logger.info(f"Starting scan on port: {port}")
             
-            # Execute scan by calling module functions
-            # We need to refactor dump_one_scan.py to be importable
-            # For now, run as subprocess
-            import subprocess
+            # Get output directory from config
+            data_dir = self.config['data']['output_dir']
             
-            script_path = self.config['scripts']['scan_2d']
-            cmd = [sys.executable, script_path]
+            # Execute scan directly (no subprocess)
+            result = run_scan(port=port, output_dir=data_dir)
             
-            if port != "auto":
-                cmd.append(port)
-            
-            self.logger.info(f"Executing: {' '.join(cmd)}")
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30  # 30 second timeout
-            )
-            
-            if result.returncode == 0:
-                self.logger.info("Scan script completed successfully")
-                self.logger.debug(f"Output: {result.stdout}")
-                
-                # Check for output files
-                data_dir = self.config['data']['output_dir']
-                csv_file = os.path.join(data_dir, "scan.csv")
-                ply_file = os.path.join(data_dir, "scan.ply")
-                
-                if not os.path.exists(csv_file) or not os.path.exists(ply_file):
-                    return {
-                        'success': False,
-                        'error': 'Output files not found',
-                        'point_count': 0,
-                        'files': []
-                    }
-                
-                # Count points from CSV
-                point_count = self._count_csv_points(csv_file)
-                
-                return {
-                    'success': True,
-                    'point_count': point_count,
-                    'files': [csv_file, ply_file],
-                    'error': None
-                }
+            if result['success']:
+                self.logger.info(f"Scan completed: {result['message']}")
+                quality = result.get('scan_quality', {})
+                if quality:
+                    self.logger.info(
+                        f"Quality: {quality.get('coverage_percent', 0):.1f}% coverage, "
+                        f"max gap {quality.get('max_gap_degrees', 0):.1f}°, "
+                        f"{quality.get('scans_merged', 1)} scans merged"
+                    )
             else:
-                self.logger.error(f"Scan script failed with code {result.returncode}")
-                self.logger.error(f"stderr: {result.stderr}")
-                return {
-                    'success': False,
-                    'error': f"Script failed: {result.stderr}",
-                    'point_count': 0,
-                    'files': []
-                }
+                self.logger.error(f"Scan failed: {result['error']}")
+            
+            return result
                 
-        except subprocess.TimeoutExpired:
-            self.logger.error("Scan script timed out")
-            return {
-                'success': False,
-                'error': 'Scan timed out after 30 seconds',
-                'point_count': 0,
-                'files': []
-            }
         except Exception as e:
             self.logger.error(f"Error running scan: {e}")
             self.logger.error(traceback.format_exc())
             return {
                 'success': False,
-                'error': str(e),
                 'point_count': 0,
-                'files': []
+                'files': [],
+                'error': str(e),
+                'message': f"Scan execution error: {str(e)}",
+                'scan_quality': {}
             }
     
     def _count_csv_points(self, csv_file: str) -> int:
