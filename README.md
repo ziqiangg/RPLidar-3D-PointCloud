@@ -7,7 +7,7 @@
 ```
 ┌──────────────────────────────────┐        ┌───────────────────────────────┐
 │ LAPTOP (Windows)                 │        │ RASPBERRY PI 5                │
-│ IP: 10.197.211.141              │◄──────►│                               │
+│ IP: `your laptop ip`            │◄──────►│                               │
 │                                  │  MQTT  │                               │
 │ ├─ Mosquitto Broker (1883)      │        │ ├─ RPLidar Scanner Service    │
 │ ├─ MQTT Viewer Client            │        │ ├─ RPLidar A1/A2 (USB)       │
@@ -40,7 +40,7 @@
 - **Laptop** (Windows/Linux/macOS) on same network
 
 ### Software
-- **Python 3.9+** (both laptop and RPi)
+- **Python 3.12** (both laptop and RPi)
 - **Mosquitto MQTT Broker** (laptop only)
 - **MQTT Explorer** (optional, for debugging)
 
@@ -179,7 +179,7 @@ RPLidar-3D-PointCloud/
 ### `config_rpi.yaml` (Raspberry Pi)
 ```yaml
 mqtt:
-  broker_host: "10.197.211.141"  # Laptop IP address
+  broker_host: "your laptop ip"  # Laptop IP address
   broker_port: 1883
   client_id: "rplidar_scanner_rpi"
   qos: 1
@@ -225,7 +225,7 @@ RPLidar Scanner Service (Raspberry Pi)
 ======================================================================
 
 INFO - RPi Scanner Service initialized
-INFO - Connecting to MQTT broker at 10.197.211.141:1883
+INFO - Connecting to MQTT broker at `your laptop ip`:1883
 INFO - Connected to MQTT broker successfully
 INFO - Ready to receive scan commands
 Scanner service running - press Ctrl+C to exit
@@ -272,8 +272,8 @@ New-NetFirewallRule -DisplayName "Mosquitto MQTT" `
 
 **Test connectivity from RPi**:
 ```bash
-ping 10.197.211.141
-telnet 10.197.211.141 1883
+ping "your laptop ip"
+telnet "your laptop ip" 1883
 ```
 
 ### Issue: No data received after scan

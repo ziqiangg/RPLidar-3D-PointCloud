@@ -3,7 +3,7 @@
 Complete setup instructions for distributed RPLidar scanning system.
 
 **System Components:**
-- **Laptop** (10.197.211.141): MQTT broker + GUI viewer
+- **Laptop**: MQTT broker + GUI viewer
 - **Raspberry Pi 5**: RPLidar scanner service
 
 ---
@@ -179,7 +179,6 @@ The RPi needs to know your laptop's IP address to connect to the MQTT broker.
 ```powershell
 ipconfig
 # Look for "IPv4 Address" under your active network adapter (WiFi or Ethernet)
-# Example: 10.197.211.141
 ```
 
 ### Linux/macOS
@@ -432,7 +431,7 @@ nano config_rpi.yaml
 **Update the following:**
 ```yaml
 mqtt:
-  broker_host: "10.197.211.141"  # ⚠️ CHANGE to your laptop IP!
+  broker_host: ""  # ⚠️ CHANGE to your laptop IP!
   broker_port: 1883
   client_id: "rplidar_scanner_rpi"
   qos: 1
@@ -446,7 +445,7 @@ logging:
   file: "rpi_scanner.log"
 ```
 
-**Critical:** Replace `10.197.211.141` with your actual laptop IP address (from Step 1.4).
+**Critical:** Replace `___` with your actual laptop IP address (from Step 1.4).
 
 **Save and exit:** Press `Ctrl+O`, `Enter`, `Ctrl+X`
 
@@ -486,13 +485,13 @@ Verify RPi can reach laptop broker:
 
 ```bash
 # Ping laptop
-ping -c 4 10.197.211.141
+ping -c 4 `your laptop ip`
 # Should show: 4 packets transmitted, 4 received
 
 # Test MQTT port (requires netcat)
 sudo apt install -y netcat
-nc -zv 10.197.211.141 1883
-# Should show: "Connection to 10.197.211.141 1883 port [tcp/*] succeeded!"
+nc -zv `your laptop ip` 1883
+# Should show: "Connection to `your laptop ip` 1883 port [tcp/*] succeeded!"
 ```
 
 **If ping fails:**
@@ -513,7 +512,7 @@ sudo apt install -y mosquitto-clients
 # Subscribe to test topic (from laptop, using MQTT Explorer or mosquitto_sub)
 
 # Publish test message from RPi
-mosquitto_pub -h 10.197.211.141 -t test -m "Hello from RPi"
+mosquitto_pub -h `your laptop ip` -t test -m "Hello from RPi"
 ```
 
 **Expected:** Message appears in MQTT Explorer or mosquitto_sub on laptop.
@@ -535,7 +534,7 @@ RPLidar Scanner Service (Raspberry Pi)
 ======================================================================
 
 INFO - RPi Scanner Service initialized
-INFO - Connecting to MQTT broker at 10.197.211.141:1883
+INFO - Connecting to MQTT broker at `your laptop ip`:1883
 INFO - Connected to MQTT broker successfully
 INFO - Subscribed to: rplidar/commands/scan
 INFO - Ready to receive scan commands
@@ -692,9 +691,9 @@ To avoid updating `config_rpi.yaml` every time laptop IP changes:
 2. Click your connection → IP settings → Edit
 3. Change to **Manual**
 4. Set:
-   - IP: `10.197.211.141` (or your preferred static IP)
+   - IP: `your laptop ip` (or your preferred static IP)
    - Subnet mask: `255.255.255.0`
-   - Gateway: (your router IP, usually `10.197.211.1`)
+   - Gateway: (your router IP, usually `your laptop ip`)
    - DNS: `8.8.8.8` (or your router IP)
 
 ### Linux
@@ -706,8 +705,8 @@ network:
   ethernets:
     eth0:  # or your interface name
       dhcp4: no
-      addresses: [10.197.211.141/24]
-      gateway4: 10.197.211.1
+      addresses: [your laptop ip/24]
+      gateway4: 
       nameservers:
         addresses: [8.8.8.8, 8.8.4.4]
 ```
@@ -806,7 +805,7 @@ ssh raspberrypi@<rpi-ip>
 
 ---
 
-## Issue: "Connection refused: 10.197.211.141:1883"
+## Issue: "Connection refused: you laptop ip:1883"
 
 **Cause**: Mosquitto not running on laptop OR firewall blocking
 
