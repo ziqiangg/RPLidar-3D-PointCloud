@@ -22,7 +22,7 @@ Complete setup instructions for distributed RPLidar scanning system.
 - RPi must be able to reach laptop IP
 
 ### Software Requirements
-- **Python 3.9+** (both laptop and RPi)
+- **Python 3.12** (both laptop and RPi)
 - **Git** (for cloning repository)
 
 ---
@@ -94,7 +94,7 @@ brew services list | grep mosquitto
 
 ### Windows
 
-Create or edit `C:\Program Files\mosquitto\mosquitto.conf`:
+Create or edit `C:\Program Files\mosquitto\mosquitto.conf` (as admin):
 ```conf
 # Basic MQTT broker configuration
 listener 1883
@@ -489,7 +489,7 @@ ping -c 4 `your laptop ip`
 # Should show: 4 packets transmitted, 4 received
 
 # Test MQTT port (requires netcat)
-sudo apt install -y netcat
+sudo apt install -y netcat-openbsd
 nc -zv `your laptop ip` 1883
 # Should show: "Connection to `your laptop ip` 1883 port [tcp/*] succeeded!"
 ```
