@@ -1,35 +1,52 @@
 """
-Scan Controller for managing RPLidar scan execution.
+Scan Controller for managing RPLidar scan execution via MQTT.
 
-Provides interface for running different scan scripts and monitoring their status.
+Communicates with Raspberry Pi scanner service over MQTT.
 """
 
 import os
 import sys
-import subprocess
-import threading
 from typing import Callable, Optional
+
+# Add parent directory to path for mqtt_protocol import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from laptop_viewer_client import LaptopViewerClient
+from mqtt_protocol import ScanStatus
 from . import config
 
 
 class ScanController:
     """
-    Controls the execution of RPLidar scan scripts.
+    Controls the execution of RPLidar scans via MQTT.
     
-    Manages running dump_one_scan.py (2D) and xyzscan_servoless.py (3D) scans.
+    Sends commands to Raspberry Pi scanner service and receives results.
     """
     
     def __init__(self):
         """Initialize the scan controller."""
         self.scan_running = False
-        self.scan_process: Optional[subprocess.Popen] = None
-        self.scan_thread: Optional[threading.Thread] = None
         self.status_callback: Optional[Callable] = None
         self.completion_callback: Optional[Callable] = None
         self.current_scan_type: Optional[str] = None
+        self.current_scan_id: Optional[str] = None
         
-        # Get Python executable from current environment
-        self.python_executable = sys.executable
+        # Initialize MQTT client
+        try:
+            config_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "config_laptop.yaml"
+            )
+            self.mqtt_client = LaptopViewerClient(config_path)
+            self.mqtt_client.set_status_callback(self._on_mqtt_status)
+            self.mqtt_client.set_data_callback(self._on_mqtt_data)
+            
+            # Connect to broker
+            self.mqtt_client.connect()
+            print("[SCAN] Connected to MQTT broker")
+        except Exception as e:
+            print(f"[SCAN] Warning: Failed to initialize MQTT client: {e}")
+            self.mqtt_client = None
     
     def set_status_callback(self, callback: Callable):
         """
@@ -51,164 +68,132 @@ class ScanController:
     
     def start_scan(self, scan_type: str, params: dict = None):
         """
-        Start a scan of the specified type.
+        Start a scan via MQTT command to Raspberry Pi.
         
         Args:
-            scan_type: "2d" or "3d"
+            scan_type: "2d" only (3D deprecated)
             params: Optional parameters including:
-                - port: Serial port (e.g., "COM3", "/dev/ttyUSB0")
+                - port: Serial port (e.g., "/dev/ttyUSB0") or "auto"
         """
+        if not self.mqtt_client:
+            self._update_status("error", "MQTT client not initialized")
+            return False
+        
         if self.scan_running:
             self._update_status("error", "A scan is already running")
             return False
         
         params = params or {}
         
-        if scan_type == config.SCAN_TYPE_2D:
-            script_path = config.SCRIPT_2D_SCAN
-            output_file = config.SCAN_2D_PLY
-        elif scan_type == config.SCAN_TYPE_3D:
-            script_path = config.SCRIPT_3D_SCAN
-            output_file = config.SCAN_3D_PLY
-        else:
-            self._update_status("error", f"Unknown scan type: {scan_type}")
+        # Only support 2D scans now
+        if scan_type != config.SCAN_TYPE_2D:
+            self._update_status("error", f"Scan type '{scan_type}' not supported (only 2D scans available)")
             return False
         
-        # Verify script exists
-        if not os.path.exists(script_path):
-            self._update_status("error", f"Scan script not found: {script_path}")
+        # Get port parameter
+        port = params.get("port", "").strip()
+        if not port:
+            port = "auto"
+        
+        # Request scan via MQTT
+        try:
+            self.current_scan_type = scan_type
+            self.scan_running = True
+            
+            self.current_scan_id = self.mqtt_client.request_scan(
+                scan_type=scan_type,
+                port=port
+            )
+            
+            self._update_status("started", f"Scan request sent to Raspberry Pi (ID: {self.current_scan_id})")
+            print(f"[SCAN] Scan requested: {self.current_scan_id}")
+            return True
+            
+        except Exception as e:
+            self._update_status("error", f"Failed to request scan: {e}")
+            self.scan_running = False
             return False
-        
-        # Build command
-        cmd = [self.python_executable, script_path]
-        
-        # Add port if specified
-        if "port" in params and params["port"]:
-            cmd.append(params["port"])
-        
-        # Start scan in a separate thread
-        self.scan_thread = threading.Thread(
-            target=self._run_scan,
-            args=(scan_type, cmd, output_file)
-        )
-        self.scan_thread.daemon = True
-        self.scan_thread.start()
-        
-        return True
     
     def send_input(self, text: str):
         """
-        Send input to the running scan process.
+        Send input (deprecated - no longer used for 2D scans).
         
         Args:
-            text: Input text to send (e.g., servo angle or 'q')
+            text: Input text
         """
-        if self.scan_running and self.scan_process and self.scan_process.stdin:
-            try:
-                self.scan_process.stdin.write(text + "\n")
-                self.scan_process.stdin.flush()
-                print(f"[SCAN] Sent input: {text}")
-            except Exception as e:
-                print(f"[SCAN] Error sending input: {e}")
-                self._update_status("error", f"Error sending input: {e}")
+        print("[SCAN] send_input() not supported for MQTT-based scans")
     
     def stop_scan(self):
         """Stop the currently running scan."""
-        if self.scan_running and self.scan_process:
-            try:
-                print("[SCAN] Stopping scan...")
-                # For interactive 3D scans, send 'q' first
-                if self.current_scan_type == config.SCAN_TYPE_3D and self.scan_process.stdin:
-                    try:
-                        self.send_input('q')
-                        # Wait briefly for graceful exit
-                        self.scan_process.wait(timeout=3)
-                        self._update_status("stopped", "Scan stopped by user")
-                        return
-                    except subprocess.TimeoutExpired:
-                        pass
-                
-                # Try graceful termination
-                self.scan_process.terminate()
-                try:
-                    self.scan_process.wait(timeout=2)
-                    self._update_status("stopped", "Scan stopped by user")
-                except subprocess.TimeoutExpired:
-                    # Force kill if terminate didn't work
-                    print("[SCAN] Process not responding, force killing...")
-                    self.scan_process.kill()
-                    self.scan_process.wait(timeout=2)
-                    self._update_status("stopped", "Scan forcefully stopped")
-            except Exception as e:
-                print(f"[SCAN] Error stopping scan: {e}")
-                self._update_status("error", f"Error stopping scan: {e}")
-            finally:
-                self.scan_running = False
-                self.scan_process = None
-                self.current_scan_type = None
+        if not self.scan_running or not self.current_scan_id:
+            print("[SCAN] No scan running to stop")
+            return
+        
+        if not self.mqtt_client:
+            self._update_status("error", "MQTT client not available")
+            return
+        
+        try:
+            print(f"[SCAN] Requesting stop for scan: {self.current_scan_id}")
+            self.mqtt_client.stop_scan(self.current_scan_id)
+            self._update_status("stopped", "Stop request sent to Raspberry Pi")
+        except Exception as e:
+            print(f"[SCAN] Error stopping scan: {e}")
+            self._update_status("error", f"Error stopping scan: {e}")
     
     def is_running(self) -> bool:
         """Check if a scan is currently running."""
         return self.scan_running
     
-    def _run_scan(self, scan_type: str, cmd: list, output_file: str):
+    def _on_mqtt_status(self, scan_id: str, status: ScanStatus):
         """
-        Run the scan script (internal method, runs in separate thread).
+        Handle status update from MQTT.
         
         Args:
-            scan_type: Type of scan ("2d" or "3d")
-            cmd: Command to execute
-            output_file: Expected output file path
+            scan_id: Scan identifier
+            status: Status message from Raspberry Pi
         """
-        self.scan_running = True
-        self.current_scan_type = scan_type
-        self._update_status("started", f"Starting {scan_type} scan...")
+        print(f"[SCAN] Status for {scan_id}: {status.status} - {status.message}")
         
-        try:
-            # Run the scan script (enable stdin for 3D interactive mode)
-            self.scan_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # Merge stderr into stdout for unified output
-                stdin=subprocess.PIPE if scan_type == config.SCAN_TYPE_3D else None,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
-            
-            # Stream output
-            for line in self.scan_process.stdout:
-                print(f"[SCAN] {line.rstrip()}")
-                self._update_status("running", line.rstrip())
-            
-            # Wait for completion
-            return_code = self.scan_process.wait()
-            
-            if return_code == 0:
-                # Check if output file was created
-                if os.path.exists(output_file):
-                    self._update_status("completed", f"Scan completed successfully")
-                    if self.completion_callback:
-                        self.completion_callback(scan_type, True, output_file)
-                else:
-                    self._update_status("error", "Scan completed but output file not found")
-                    if self.completion_callback:
-                        self.completion_callback(scan_type, False, "")
-            else:
-                # Scan failed or was terminated
-                self._update_status("error", f"Scan exited with code {return_code}")
-                if self.completion_callback:
-                    self.completion_callback(scan_type, False, "")
+        # Only process if it's our current scan
+        if scan_id != self.current_scan_id:
+            print(f"[SCAN] Status for different scan, ignoring")
+            return
         
-        except Exception as e:
-            self._update_status("error", f"Error running scan: {e}")
-            if self.completion_callback:
-                self.completion_callback(scan_type, False, "")
+        # Update GUI status
+        self._update_status(status.status, status.message)
         
-        finally:
+        # Handle completion
+        if status.status in ["completed", "error", "stopped"]:
             self.scan_running = False
-            self.scan_process = None
+            
+            if status.status == "completed":
+                # Success
+                output_file = config.SCAN_2D_PLY
+                if self.completion_callback:
+                    self.completion_callback(self.current_scan_type, True, output_file)
+            else:
+                # Error or stopped
+                if self.completion_callback:
+                    self.completion_callback(self.current_scan_type, False, "")
+            
+            self.current_scan_id = None
             self.current_scan_type = None
+    
+    def _on_mqtt_data(self, scan_id: str, file_paths: list):
+        """
+        Handle data received from MQTT.
+        
+        Args:
+            scan_id: Scan identifier
+            file_paths: List of received file paths
+        """
+        print(f"[SCAN] Data received for {scan_id}:")
+        for path in file_paths:
+            print(f"  - {path}")
+        
+        # Files are automatically saved by the MQTT client
+        # GUI can now load them
     
     def _update_status(self, status: str, message: str):
         """Update status via callback."""
@@ -219,11 +204,18 @@ class ScanController:
 
 # Standalone test
 if __name__ == "__main__":
+    import time
+    
     def status_cb(status, message):
         print(f"Status: {status} - {message}")
     
     def complete_cb(scan_type, success, file_path):
         print(f"Scan complete: type={scan_type}, success={success}, file={file_path}")
+    
+    print("="*70)
+    print("Scan Controller Test (MQTT Mode)")
+    print("="*70)
+    print()
     
     controller = ScanController()
     controller.set_status_callback(status_cb)
@@ -233,8 +225,15 @@ if __name__ == "__main__":
     controller.start_scan("2d")
     
     # Wait for completion
-    import time
-    while controller.is_running():
-        time.sleep(1)
+    print("Waiting for scan to complete...")
+    try:
+        while controller.is_running():
+            time.sleep(1)
+        print("\nScan finished!")
+        time.sleep(2)  # Wait for data transfer
+    except KeyboardInterrupt:
+        print("\nStopping scan...")
+        controller.stop_scan()
     
     print("Done!")
+

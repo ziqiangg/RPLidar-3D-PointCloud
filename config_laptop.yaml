@@ -1,0 +1,22 @@
+# Laptop Viewer Client Configuration
+
+mqtt:
+  broker_host: "localhost"  # Broker runs on laptop
+  broker_port: 1883
+  qos: 1
+  
+device:
+  role: "client"
+  client_id: "rplidar_viewer_laptop"
+  
+data:
+  receive_dir: "./data"  # Where to save received scan data
+  auto_load: true  # Automatically load scans when received
+  
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  
+viewer:
+  window_width: 1280
+  window_height: 720
+  point_size: 2.0

@@ -1,0 +1,22 @@
+# Raspberry Pi Scanner Service Configuration
+
+mqtt:
+  broker_host: "10.197.211.141"  # Laptop IP address CHANGE ACCORDINGLY
+  broker_port: 1883
+  qos: 1
+  
+device:
+  role: "scanner"
+  client_id: "rplidar_scanner_rpi"
+  default_port: "/dev/ttyUSB0"  # Linux default
+  
+scripts:
+  scan_2d: "./dump_one_scan.py"
+  
+data:
+  output_dir: "./data"
+  formats: ["csv", "ply"]  # Generate both formats
+  
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  file: "./rpi_scanner.log"
