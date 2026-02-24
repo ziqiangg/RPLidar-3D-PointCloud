@@ -12,7 +12,8 @@ from .messages import (
     StopCommand,
     ScanStatus,
     DataMessage,
-    StatusType
+    StatusType,
+    MessageDecoder
 )
 from .client_base import MQTTClientBase
 
@@ -23,6 +24,7 @@ __all__ = [
     'ScanStatus',
     'DataMessage',
     'StatusType',
+    'MessageDecoder',
     'MQTTClientBase'
 ]
 
