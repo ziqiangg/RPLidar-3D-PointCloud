@@ -1,7 +1,7 @@
 # Raspberry Pi Scanner Service Configuration
 
 mqtt:
-  broker_host: "10.197.211.141"  # Laptop IP address CHANGE ACCORDINGLY
+  broker_host: ""  # Laptop IP address CHANGE ACCORDINGLY
   broker_port: 1883
   qos: 1
   
