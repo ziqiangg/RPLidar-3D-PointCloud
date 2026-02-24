@@ -9,6 +9,7 @@ and laptop GUI client.
 from .topics import Topics
 from .messages import (
     ScanCommand,
+    StopCommand,
     ScanStatus,
     DataMessage,
     StatusType
@@ -18,6 +19,7 @@ from .client_base import MQTTClientBase
 __all__ = [
     'Topics',
     'ScanCommand',
+    'StopCommand',
     'ScanStatus',
     'DataMessage',
     'StatusType',
