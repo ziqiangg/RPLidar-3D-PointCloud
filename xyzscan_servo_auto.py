@@ -49,7 +49,7 @@ SERVO_MIN_PULSE_WIDTH = 1 / 1000
 SERVO_MAX_PULSE_WIDTH = 2 / 1000
 SERVO_SETTLE_TIME = 0.08
 SERVO_RESET_SETTLE_TIME = 0.02
-SERVO_RELEASE_AFTER_MOVE = True
+SERVO_RELEASE_AFTER_MOVE = False
 
 # Azimuth sweep defaults
 AZIMUTH_START = 0
@@ -201,14 +201,13 @@ def validate_scan_quality(
 
 
 def perform_scan_at_angle(
-    lidar: RPLidar,
+    scan_iterator,
     min_angle_resolution: float,
     min_coverage: float,
     relaxed_max_gap: float,
     max_scans_to_merge: int,
     plateau_patience: int,
     slice_timeout: float,
-    buffer_size: int,
     should_stop: Optional[Callable[[], bool]] = None,
 ) -> Dict:
     """
@@ -220,7 +219,7 @@ def perform_scan_at_angle(
     last_coverage = 0.0
     plateau_count = 0
 
-    for scan in lidar.iter_scans(max_buf_meas=buffer_size, min_len=50):
+    while True:
         if _is_stop_requested(should_stop):
             return {
                 "success": False,
@@ -235,10 +234,30 @@ def perform_scan_at_angle(
             }
 
         elapsed = time.time() - start_time
+        if elapsed > slice_timeout:
+            break
+
+        try:
+            scan = next(scan_iterator)
+        except StopIteration:
+            return {
+                "success": False,
+                "stopped": False,
+                "scan": [],
+                "coverage": 0.0,
+                "max_gap": 360.0,
+                "point_count": 0,
+                "scans_merged": len(collected_scans),
+                "quality_message": "LiDAR scan iterator ended",
+                "error": "LiDAR scan iterator ended",
+            }
+        except Exception as e:
+            # Allow transient read errors/timeouts and continue until slice timeout.
+            if (time.time() - start_time) >= slice_timeout:
+                break
+            continue
 
         if not scan or len(scan) < 50:
-            if elapsed > slice_timeout:
-                break
             continue
 
         collected_scans.append(scan)
@@ -430,6 +449,7 @@ def run_scan(
     )
     slice_timeout = max(0.5, _safe_float(scan_config.get("slice_timeout", SLICE_TIMEOUT), SLICE_TIMEOUT))
     buffer_size = max(200, _safe_int(scan_config.get("buffer_size", BUFFER_SIZE), BUFFER_SIZE))
+    lidar_timeout = max(0.1, _safe_float(scan_config.get("lidar_timeout", 1.0), 1.0))
     progress_every_slices = max(
         1,
         _safe_int(
@@ -452,6 +472,7 @@ def run_scan(
         port = get_default_port()
 
     lidar = None
+    scan_iterator = None
     servo = None
     sweep_angles: List[int] = []
     current_angle = azimuth_start
@@ -488,7 +509,7 @@ def run_scan(
             except Exception:
                 pass
 
-        lidar = RPLidar(port, baudrate=BAUD, timeout=3)
+        lidar = RPLidar(port, baudrate=BAUD, timeout=lidar_timeout)
         if hardware_callback:
             try:
                 hardware_callback("lidar", lidar)
@@ -498,6 +519,7 @@ def run_scan(
         lidar.get_health()
         lidar.start_motor()
         time.sleep(2)
+        scan_iterator = lidar.iter_scans(max_buf_meas=buffer_size, min_len=50)
 
         sweep_angles = build_sweep_angles(azimuth_start, azimuth_end, azimuth_step)
         if not sweep_angles:
@@ -569,14 +591,13 @@ def run_scan(
                 servo.release()
 
             slice_result = perform_scan_at_angle(
-                lidar=lidar,
+                scan_iterator=scan_iterator,
                 min_angle_resolution=min_angle_resolution,
                 min_coverage=min_coverage,
                 relaxed_max_gap=relaxed_max_gap,
                 max_scans_to_merge=max_scans_to_merge,
                 plateau_patience=plateau_patience,
                 slice_timeout=slice_timeout,
-                buffer_size=buffer_size,
                 should_stop=should_stop,
             )
 

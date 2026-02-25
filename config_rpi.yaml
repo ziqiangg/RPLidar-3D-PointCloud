@@ -22,7 +22,7 @@ servo:
   min_pulse_width: 0.001
   max_pulse_width: 0.002
   settle_time: 0.08
-  release_after_move: true
+  release_after_move: false
   reset_settle_time: 0.02
 
 scan3d:
@@ -35,7 +35,9 @@ scan3d:
   max_scans_to_merge: 20
   plateau_patience: 5
   slice_timeout: 5.0
+  lidar_timeout: 1.0
   progress_every_slices: 1
+  worker_stall_timeout: 20.0
   buffer_size: 5000
   
 logging:

@@ -435,6 +435,11 @@ class RPiScannerService(MQTTClientBase):
 
             stop_grace_deadline = None
             result = None
+            last_progress_at = time.time()
+            worker_stall_timeout = max(
+                10.0,
+                float(scan3d_cfg.get('worker_stall_timeout', 20.0))
+            )
 
             while True:
                 if self.stop_requested.is_set():
@@ -470,11 +475,50 @@ class RPiScannerService(MQTTClientBase):
                         message = progress.get('message', "3D scan in progress")
                         point_count = progress.get('point_count')
                         self._publish_started_status(scan_id, message, point_count=point_count)
+                        last_progress_at = time.time()
                     elif msg_type == "result":
                         result = msg.get("data")
+                        last_progress_at = time.time()
                         break
                 except queue.Empty:
                     pass
+
+                if (
+                    worker.is_alive()
+                    and not self.stop_requested.is_set()
+                    and (time.time() - last_progress_at) > 8.0
+                ):
+                    self._publish_started_status(
+                        scan_id,
+                        "Waiting for LiDAR data in current slice...",
+                    )
+                    last_progress_at = time.time()
+
+                if (
+                    worker.is_alive()
+                    and not self.stop_requested.is_set()
+                    and (time.time() - last_progress_at) > worker_stall_timeout
+                ):
+                    self.logger.warning(
+                        f"3D worker stalled for >{worker_stall_timeout:.1f}s; terminating"
+                    )
+                    worker.terminate()
+                    worker.join(timeout=2.0)
+                    if worker.is_alive():
+                        try:
+                            worker.kill()
+                        except Exception:
+                            pass
+                    result = {
+                        'success': False,
+                        'stopped': False,
+                        'point_count': 0,
+                        'files': [],
+                        'error': '3D worker stalled waiting for LiDAR data',
+                        'message': '3D scan failed: stalled waiting for LiDAR data',
+                        'scan_quality': {}
+                    }
+                    break
 
                 if not worker.is_alive():
                     if result is None:
