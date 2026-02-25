@@ -14,6 +14,7 @@ service in the same style as dump_one_scan.py.
 import csv
 import math
 import os
+import select
 import sys
 import time
 from typing import Callable, Dict, List, Optional, Tuple
@@ -56,6 +57,8 @@ AZIMUTH_START = 0
 AZIMUTH_END = 180
 AZIMUTH_STEP = 1
 PROGRESS_EVERY_SLICES = 1
+INTER_SLICE_SLEEP = 1.0
+MANUAL_STEP_MODE = False
 
 
 class ServoFS90:
@@ -148,6 +151,64 @@ def _emit_progress(
         progress_callback(payload)
     except Exception:
         pass
+
+
+def _sleep_with_stop(
+    duration_sec: float,
+    should_stop: Optional[Callable[[], bool]] = None,
+    tick_sec: float = 0.1,
+) -> bool:
+    """
+    Sleep in small chunks so stop requests can interrupt wait periods.
+
+    Returns:
+        bool: True if stop requested during sleep, else False
+    """
+    remaining = max(0.0, float(duration_sec))
+    while remaining > 0:
+        if _is_stop_requested(should_stop):
+            return True
+        chunk = min(max(0.01, tick_sec), remaining)
+        time.sleep(chunk)
+        remaining -= chunk
+    return _is_stop_requested(should_stop)
+
+
+def _wait_for_step_confirmation(
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> str:
+    """
+    Wait for terminal confirmation before stepping.
+
+    Returns:
+        "continue", "continue_noninteractive", or "stop"
+    """
+    # If not in an interactive terminal, fail open and continue.
+    if not sys.stdin or not sys.stdin.isatty():
+        return "continue_noninteractive"
+
+    print("Press Enter to step to next slice, or type 'q' to stop:", flush=True)
+    while True:
+        if _is_stop_requested(should_stop):
+            return "stop"
+        try:
+            readable, _, _ = select.select([sys.stdin], [], [], 0.2)
+        except Exception:
+            # If select fails, continue automatically.
+            return "continue_noninteractive"
+        if not readable:
+            continue
+
+        try:
+            line = sys.stdin.readline()
+        except Exception:
+            return "continue_noninteractive"
+
+        if line is None:
+            return "continue_noninteractive"
+        if line.strip().lower() == "q":
+            return "stop"
+        return "continue"
 
 
 def merge_scans(scans: List[List[Tuple[int, float, float]]], min_angle_resolution: float) -> List[Tuple[int, float, float]]:
@@ -503,6 +564,17 @@ def run_scan(
             PROGRESS_EVERY_SLICES,
         ),
     )
+    inter_slice_sleep = max(
+        0.0,
+        _safe_float(
+            scan_config.get("inter_slice_sleep", INTER_SLICE_SLEEP),
+            INTER_SLICE_SLEEP,
+        ),
+    )
+    manual_step_mode = _safe_bool(
+        scan_config.get("manual_step_mode", MANUAL_STEP_MODE),
+        MANUAL_STEP_MODE,
+    )
 
     result = {
         "success": False,
@@ -637,12 +709,6 @@ def run_scan(
                     point_count=len(all_points_3d),
                 )
 
-            servo.set_angle(physical_angle)
-            current_angle = physical_angle
-            time.sleep(servo_settle_time)
-            if release_after_move:
-                servo.release()
-
             slice_result = perform_scan_at_angle(
                 scan_iterator=scan_iterator,
                 min_angle_resolution=min_angle_resolution,
@@ -678,7 +744,8 @@ def run_scan(
                     },
                 }
 
-            if not slice_result["success"]:
+            slice_succeeded = bool(slice_result.get("success"))
+            if not slice_succeeded:
                 failed_slices += 1
                 if (
                     slice_index == 1
@@ -698,36 +765,207 @@ def run_scan(
                         servo_angle=physical_angle,
                         point_count=len(all_points_3d),
                     )
+            else:
+                successful_slices += 1
+                scans_merged_per_slice.append(slice_result["scans_merged"])
+                slice_coverages.append(slice_result["coverage"] * 100.0)
+
+                all_points_3d.extend(
+                    compute_3d_coordinates(slice_result["scan"], servo_angle_deg=angle)
+                )
+
+                if (
+                    slice_index == 1
+                    or slice_index % progress_every_slices == 0
+                    or slice_index == len(sweep_angles)
+                ):
+                    _emit_progress(
+                        progress_callback,
+                        "slice_done",
+                        (
+                            f"Slice {slice_index}/{len(sweep_angles)} done "
+                            f"(az={angle}°, servo={physical_angle:.1f}°, "
+                            f"cov={slice_result['coverage'] * 100:.1f}%, "
+                            f"total_pts={len(all_points_3d)})"
+                        ),
+                        slice_index=slice_index,
+                        total_slices=len(sweep_angles),
+                        angle=angle,
+                        servo_angle=physical_angle,
+                        point_count=len(all_points_3d),
+                    )
+
+            if slice_index >= len(sweep_angles):
                 continue
 
-            successful_slices += 1
-            scans_merged_per_slice.append(slice_result["scans_merged"])
-            slice_coverages.append(slice_result["coverage"] * 100.0)
+            next_angle = sweep_angles[slice_index]
+            next_physical_angle = physical_sweep_angles[slice_index]
 
-            all_points_3d.extend(
-                compute_3d_coordinates(slice_result["scan"], servo_angle_deg=angle)
-            )
-
-            if (
-                slice_index == 1
-                or slice_index % progress_every_slices == 0
-                or slice_index == len(sweep_angles)
-            ):
+            if inter_slice_sleep > 0:
                 _emit_progress(
                     progress_callback,
-                    "slice_done",
+                    "slice_pause",
                     (
-                        f"Slice {slice_index}/{len(sweep_angles)} done "
-                        f"(az={angle}°, servo={physical_angle:.1f}°, "
-                        f"cov={slice_result['coverage'] * 100:.1f}%, "
-                        f"total_pts={len(all_points_3d)})"
+                        f"Slice {slice_index}/{len(sweep_angles)} complete. "
+                        f"Pausing {inter_slice_sleep:.1f}s before step."
                     ),
                     slice_index=slice_index,
                     total_slices=len(sweep_angles),
                     angle=angle,
                     servo_angle=physical_angle,
+                    next_angle=next_angle,
+                    next_servo_angle=next_physical_angle,
+                    slice_success=slice_succeeded,
                     point_count=len(all_points_3d),
                 )
+                if _sleep_with_stop(inter_slice_sleep, should_stop=should_stop):
+                    _emit_progress(
+                        progress_callback,
+                        "stopped",
+                        f"Scan stopped at slice {slice_index}/{len(sweep_angles)}",
+                        slice_index=slice_index,
+                        total_slices=len(sweep_angles),
+                        angle=angle,
+                        point_count=len(all_points_3d),
+                    )
+                    return {
+                        "success": False,
+                        "stopped": True,
+                        "point_count": len(all_points_3d),
+                        "files": [],
+                        "error": None,
+                        "message": "Scan stopped by user",
+                        "scan_quality": {
+                            "successful_slices": successful_slices,
+                            "failed_slices": failed_slices,
+                            "total_slices": len(sweep_angles),
+                        },
+                    }
+
+            if manual_step_mode:
+                _emit_progress(
+                    progress_callback,
+                    "step_wait",
+                    (
+                        "Manual step requested. "
+                        "Press Enter on scanner terminal to move to next slice "
+                        f"({slice_index + 1}/{len(sweep_angles)}, az={next_angle}°)."
+                    ),
+                    slice_index=slice_index,
+                    total_slices=len(sweep_angles),
+                    angle=angle,
+                    servo_angle=physical_angle,
+                    next_angle=next_angle,
+                    next_servo_angle=next_physical_angle,
+                    point_count=len(all_points_3d),
+                )
+                decision = _wait_for_step_confirmation(should_stop=should_stop)
+                if decision == "stop":
+                    _emit_progress(
+                        progress_callback,
+                        "stopped",
+                        f"Scan stopped at slice {slice_index}/{len(sweep_angles)}",
+                        slice_index=slice_index,
+                        total_slices=len(sweep_angles),
+                        angle=angle,
+                        point_count=len(all_points_3d),
+                    )
+                    return {
+                        "success": False,
+                        "stopped": True,
+                        "point_count": len(all_points_3d),
+                        "files": [],
+                        "error": None,
+                        "message": "Scan stopped by user",
+                        "scan_quality": {
+                            "successful_slices": successful_slices,
+                            "failed_slices": failed_slices,
+                            "total_slices": len(sweep_angles),
+                        },
+                    }
+                if decision == "continue_noninteractive":
+                    _emit_progress(
+                        progress_callback,
+                        "step_wait",
+                        (
+                            "Manual step mode enabled but scanner service is non-interactive; "
+                            "auto-stepping to next slice."
+                        ),
+                        slice_index=slice_index,
+                        total_slices=len(sweep_angles),
+                        angle=angle,
+                        servo_angle=physical_angle,
+                        next_angle=next_angle,
+                        next_servo_angle=next_physical_angle,
+                        point_count=len(all_points_3d),
+                    )
+
+            if _is_stop_requested(should_stop):
+                _emit_progress(
+                    progress_callback,
+                    "stopped",
+                    f"Scan stopped at slice {slice_index}/{len(sweep_angles)}",
+                    slice_index=slice_index,
+                    total_slices=len(sweep_angles),
+                    angle=angle,
+                    point_count=len(all_points_3d),
+                )
+                return {
+                    "success": False,
+                    "stopped": True,
+                    "point_count": len(all_points_3d),
+                    "files": [],
+                    "error": None,
+                    "message": "Scan stopped by user",
+                    "scan_quality": {
+                        "successful_slices": successful_slices,
+                        "failed_slices": failed_slices,
+                        "total_slices": len(sweep_angles),
+                    },
+                }
+
+            _emit_progress(
+                progress_callback,
+                "step_move",
+                (
+                    f"Stepping to slice {slice_index + 1}/{len(sweep_angles)}: "
+                    f"az={next_angle}° (servo {next_physical_angle:.1f}°)"
+                ),
+                slice_index=slice_index,
+                total_slices=len(sweep_angles),
+                angle=angle,
+                servo_angle=physical_angle,
+                next_angle=next_angle,
+                next_servo_angle=next_physical_angle,
+                point_count=len(all_points_3d),
+            )
+            servo.set_angle(next_physical_angle)
+            current_angle = next_physical_angle
+            if _sleep_with_stop(servo_settle_time, should_stop=should_stop):
+                _emit_progress(
+                    progress_callback,
+                    "stopped",
+                    f"Scan stopped at slice {slice_index}/{len(sweep_angles)}",
+                    slice_index=slice_index,
+                    total_slices=len(sweep_angles),
+                    angle=angle,
+                    point_count=len(all_points_3d),
+                )
+                return {
+                    "success": False,
+                    "stopped": True,
+                    "point_count": len(all_points_3d),
+                    "files": [],
+                    "error": None,
+                    "message": "Scan stopped by user",
+                    "scan_quality": {
+                        "successful_slices": successful_slices,
+                        "failed_slices": failed_slices,
+                        "total_slices": len(sweep_angles),
+                    },
+                }
+            if release_after_move:
+                servo.release()
 
         if not all_points_3d:
             result["error"] = "No valid 3D points collected"

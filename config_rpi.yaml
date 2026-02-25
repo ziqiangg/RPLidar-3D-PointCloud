@@ -33,6 +33,11 @@ scan3d:
   azimuth_start: 0
   azimuth_end: 180
   azimuth_step: 1
+  # Delay between finishing a slice and stepping to the next azimuth.
+  inter_slice_sleep: 1.0
+  # Debug mode: wait for Enter on scanner terminal before each step.
+  # In non-interactive service mode, it auto-continues.
+  manual_step_mode: true
   min_angle_resolution: 2.0
   min_coverage: 0.80
   relaxed_max_gap: 10.0
