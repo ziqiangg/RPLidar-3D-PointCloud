@@ -23,6 +23,11 @@ except Exception:  # pragma: no cover - expected outside Raspberry Pi
     Servo = None
     LGPIOFactory = None
 
+try:
+    from gpiozero.pins.pigpio import PiGPIOFactory
+except Exception:  # pragma: no cover - optional dependency
+    PiGPIOFactory = None
+
 
 CONFIG_PATH = "config_rpi.yaml"
 STATE_FILE = "/tmp/servo_azimuth_state.json"
@@ -150,6 +155,23 @@ def _load_calibration() -> Dict[str, float]:
     }
 
 
+def _build_pin_factory():
+    """
+    Prefer pigpio for stable PWM timing; fall back to lgpio.
+    """
+    if PiGPIOFactory is not None:
+        try:
+            return PiGPIOFactory(), "pigpio"
+        except Exception:
+            pass
+    if LGPIOFactory is not None:
+        try:
+            return LGPIOFactory(), "lgpio"
+        except Exception:
+            pass
+    return None, "default"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Calibrate continuous-servo azimuth with simple zero/step commands."
@@ -214,13 +236,21 @@ def main() -> int:
 
     servo = None
     try:
-        factory = LGPIOFactory()
-        servo = Servo(
-            pin,
-            min_pulse_width=min_pulse,
-            max_pulse_width=max_pulse,
-            pin_factory=factory,
-        )
+        factory, factory_name = _build_pin_factory()
+        print(f"Pin factory: {factory_name}")
+        if factory is None:
+            servo = Servo(
+                pin,
+                min_pulse_width=min_pulse,
+                max_pulse_width=max_pulse,
+            )
+        else:
+            servo = Servo(
+                pin,
+                min_pulse_width=min_pulse,
+                max_pulse_width=max_pulse,
+                pin_factory=factory,
+            )
 
         # Stop -> drive -> stop
         servo.value = neutral
