@@ -30,7 +30,7 @@ servo:
   reset_settle_time: 0.02
   calibration:
     # If cw command moves wrong way, set this to false.
-    cw_increases_angle: true
+    cw_increases_angle: false
     # Smooth motion granularity for set_servo_azimuth.py
     sweep_step_deg: 1.0
     sweep_delay_sec: 0.01
