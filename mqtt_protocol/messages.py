@@ -74,14 +74,14 @@ class StopCommand:
 @dataclass
 class ScanStatus:
     """
-    Final status message for a completed/failed scan.
+    Status message for scan lifecycle and progress.
     
     Published by: Raspberry Pi
     Subscribed by: Laptop
     Topic: rplidar/status/<scan_id>
     """
     scan_id: str
-    status: str  # "completed", "error", "stopped"
+    status: str  # "started", "completed", "error", "stopped"
     message: str
     timestamp: str
     point_count: Optional[int] = None
@@ -116,6 +116,22 @@ class ScanStatus:
             status=StatusType.ERROR.value,
             message=error_message,
             error_details=error_details,
+            timestamp=datetime.now().isoformat()
+        )
+
+    @classmethod
+    def create_started(
+        cls,
+        scan_id: str,
+        message: str = "Scan started",
+        point_count: Optional[int] = None
+    ) -> 'ScanStatus':
+        """Create a started/progress status message."""
+        return cls(
+            scan_id=scan_id,
+            status=StatusType.STARTED.value,
+            message=message,
+            point_count=point_count,
             timestamp=datetime.now().isoformat()
         )
     

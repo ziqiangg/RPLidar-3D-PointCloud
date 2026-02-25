@@ -97,6 +97,14 @@ class RPiScannerService(MQTTClientBase):
     def on_disconnected(self):
         """Called when disconnected from broker."""
         self.logger.warning("Disconnected from MQTT broker - will attempt reconnect")
+
+    def _publish_started_status(self, scan_id: str, message: str, point_count: Optional[int] = None):
+        """Publish started/progress status updates."""
+        try:
+            status = ScanStatus.create_started(scan_id, message=message, point_count=point_count)
+            self.publish(Topics.status_topic(scan_id), status.to_json())
+        except Exception as e:
+            self.logger.error(f"Failed to publish started status: {e}")
     
     def _handle_scan_command(self, topic: str, payload: bytes):
         """Handle incoming scan command."""
@@ -129,6 +137,11 @@ class RPiScannerService(MQTTClientBase):
                 )
                 self.scan_thread.start()
                 self.logger.info(f"Scan worker started for {command.scan_id}")
+
+            self._publish_started_status(
+                command.scan_id,
+                f"Scan accepted ({command.scan_type}). Initializing..."
+            )
             
         except Exception as e:
             self.logger.error(f"Error handling scan command: {e}")
@@ -156,13 +169,17 @@ class RPiScannerService(MQTTClientBase):
         """Execute a scan based on command."""
         try:
             self.logger.info(f"Starting scan {command.scan_id}")
+            self._publish_started_status(
+                command.scan_id,
+                f"Scan started on Raspberry Pi ({command.scan_type})"
+            )
             
             # Import and run scan directly (not subprocess)
             # This allows us to capture results programmatically.
             if command.scan_type == "2d":
                 scan_result = self._run_scan_2d(command.port)
             elif command.scan_type == "3d":
-                scan_result = self._run_scan_3d(command.port)
+                scan_result = self._run_scan_3d(command.port, command.scan_id)
             else:
                 self.logger.error(f"Unsupported scan type: {command.scan_type}")
                 status = ScanStatus.create_error(
@@ -259,6 +276,11 @@ class RPiScannerService(MQTTClientBase):
                 port = get_default_port()
             
             self.logger.info(f"Starting scan on port: {port}")
+            if self.current_scan_id:
+                self._publish_started_status(
+                    self.current_scan_id,
+                    "2D LiDAR capture in progress..."
+                )
             
             # Get output directory from config
             data_dir = self.config['data']['output_dir']
@@ -306,12 +328,13 @@ class RPiScannerService(MQTTClientBase):
                 'scan_quality': {}
             }
 
-    def _run_scan_3d(self, port: str) -> dict:
+    def _run_scan_3d(self, port: str, scan_id: str) -> dict:
         """
         Run automated 3D scan by importing xyzscan_servo_auto.run_scan().
 
         Args:
             port: Serial port ("auto" or specific port like "/dev/ttyUSB0")
+            scan_id: Scan identifier
 
         Returns:
             dict with keys: success, point_count, files, error, message, scan_quality
@@ -332,13 +355,19 @@ class RPiScannerService(MQTTClientBase):
             servo_cfg = self.config.get('servo', {})
             scan3d_cfg = self.config.get('scan3d', {})
 
+            def progress_cb(progress: dict):
+                message = progress.get('message', "3D scan in progress")
+                point_count = progress.get('point_count')
+                self._publish_started_status(scan_id, message, point_count=point_count)
+
             # Execute scan directly (no subprocess)
             result = run_scan(
                 port=port,
                 output_dir=data_dir,
                 servo_config=servo_cfg,
                 scan_config=scan3d_cfg,
-                should_stop=self.stop_requested.is_set
+                should_stop=self.stop_requested.is_set,
+                progress_callback=progress_cb
             )
 
             if result.get('stopped'):

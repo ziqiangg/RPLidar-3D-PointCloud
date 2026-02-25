@@ -55,6 +55,7 @@ SERVO_RELEASE_AFTER_MOVE = True
 AZIMUTH_START = 0
 AZIMUTH_END = 180
 AZIMUTH_STEP = 1
+PROGRESS_EVERY_SLICES = 5
 
 
 class ServoFS90:
@@ -130,6 +131,23 @@ def _is_stop_requested(should_stop: Optional[Callable[[], bool]]) -> bool:
         return bool(should_stop())
     except Exception:
         return False
+
+
+def _emit_progress(
+    progress_callback: Optional[Callable[[Dict], None]],
+    stage: str,
+    message: str,
+    **kwargs
+):
+    """Emit best-effort progress callbacks without interrupting scan flow."""
+    if not progress_callback:
+        return
+    payload = {"stage": stage, "message": message}
+    payload.update(kwargs)
+    try:
+        progress_callback(payload)
+    except Exception:
+        pass
 
 
 def merge_scans(scans: List[List[Tuple[int, float, float]]], min_angle_resolution: float) -> List[Tuple[int, float, float]]:
@@ -344,6 +362,7 @@ def run_scan(
     servo_config: Optional[Dict] = None,
     scan_config: Optional[Dict] = None,
     should_stop: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable[[Dict], None]] = None,
 ) -> Dict:
     """
     Execute automated 3D scan and return structured result.
@@ -410,6 +429,13 @@ def run_scan(
     )
     slice_timeout = max(0.5, _safe_float(scan_config.get("slice_timeout", SLICE_TIMEOUT), SLICE_TIMEOUT))
     buffer_size = max(200, _safe_int(scan_config.get("buffer_size", BUFFER_SIZE), BUFFER_SIZE))
+    progress_every_slices = max(
+        1,
+        _safe_int(
+            scan_config.get("progress_every_slices", PROGRESS_EVERY_SLICES),
+            PROGRESS_EVERY_SLICES,
+        ),
+    )
 
     result = {
         "success": False,
@@ -439,6 +465,7 @@ def run_scan(
 
     try:
         if _is_stop_requested(should_stop):
+            _emit_progress(progress_callback, "stopped", "Scan stopped before start")
             return {
                 "success": False,
                 "stopped": True,
@@ -467,6 +494,16 @@ def run_scan(
             result["message"] = "3D scan failed: no sweep angles generated"
             return result
 
+        _emit_progress(
+            progress_callback,
+            "started",
+            f"3D sweep initialized: {len(sweep_angles)} slices ({azimuth_start}°->{azimuth_end}°)",
+            total_slices=len(sweep_angles),
+            azimuth_start=azimuth_start,
+            azimuth_end=azimuth_end,
+            azimuth_step=azimuth_step,
+        )
+
         # Set the scan reference start azimuth (0° by default).
         servo.set_angle(sweep_angles[0])
         current_angle = sweep_angles[0]
@@ -474,8 +511,17 @@ def run_scan(
         if release_after_move:
             servo.release()
 
-        for angle in sweep_angles:
+        for slice_index, angle in enumerate(sweep_angles, start=1):
             if _is_stop_requested(should_stop):
+                _emit_progress(
+                    progress_callback,
+                    "stopped",
+                    f"Scan stopped at slice {slice_index}/{len(sweep_angles)}",
+                    slice_index=slice_index,
+                    total_slices=len(sweep_angles),
+                    angle=angle,
+                    point_count=len(all_points_3d),
+                )
                 return {
                     "success": False,
                     "stopped": True,
@@ -489,6 +535,21 @@ def run_scan(
                         "total_slices": len(sweep_angles),
                     },
                 }
+
+            if (
+                slice_index == 1
+                or slice_index % progress_every_slices == 0
+                or slice_index == len(sweep_angles)
+            ):
+                _emit_progress(
+                    progress_callback,
+                    "slice_start",
+                    f"Scanning slice {slice_index}/{len(sweep_angles)} at azimuth {angle}°",
+                    slice_index=slice_index,
+                    total_slices=len(sweep_angles),
+                    angle=angle,
+                    point_count=len(all_points_3d),
+                )
 
             servo.set_angle(angle)
             current_angle = angle
@@ -509,6 +570,15 @@ def run_scan(
             )
 
             if slice_result.get("stopped"):
+                _emit_progress(
+                    progress_callback,
+                    "stopped",
+                    f"Scan stopped at slice {slice_index}/{len(sweep_angles)}",
+                    slice_index=slice_index,
+                    total_slices=len(sweep_angles),
+                    angle=angle,
+                    point_count=len(all_points_3d),
+                )
                 return {
                     "success": False,
                     "stopped": True,
@@ -525,6 +595,20 @@ def run_scan(
 
             if not slice_result["success"]:
                 failed_slices += 1
+                if (
+                    slice_index == 1
+                    or slice_index % progress_every_slices == 0
+                    or slice_index == len(sweep_angles)
+                ):
+                    _emit_progress(
+                        progress_callback,
+                        "slice_failed",
+                        f"Slice {slice_index}/{len(sweep_angles)} failed at {angle}°",
+                        slice_index=slice_index,
+                        total_slices=len(sweep_angles),
+                        angle=angle,
+                        point_count=len(all_points_3d),
+                    )
                 continue
 
             successful_slices += 1
@@ -534,6 +618,25 @@ def run_scan(
             all_points_3d.extend(
                 compute_3d_coordinates(slice_result["scan"], servo_angle_deg=angle)
             )
+
+            if (
+                slice_index == 1
+                or slice_index % progress_every_slices == 0
+                or slice_index == len(sweep_angles)
+            ):
+                _emit_progress(
+                    progress_callback,
+                    "slice_done",
+                    (
+                        f"Slice {slice_index}/{len(sweep_angles)} done "
+                        f"(az={angle}°, cov={slice_result['coverage'] * 100:.1f}%, "
+                        f"total_pts={len(all_points_3d)})"
+                    ),
+                    slice_index=slice_index,
+                    total_slices=len(sweep_angles),
+                    angle=angle,
+                    point_count=len(all_points_3d),
+                )
 
         if not all_points_3d:
             result["error"] = "No valid 3D points collected"
@@ -548,6 +651,13 @@ def run_scan(
         os.makedirs(output_dir, exist_ok=True)
         csv_file = os.path.join(output_dir, "scan.csv")
         ply_file = os.path.join(output_dir, "scan.ply")
+
+        _emit_progress(
+            progress_callback,
+            "saving",
+            f"Saving output files ({len(all_points_3d)} points)",
+            point_count=len(all_points_3d),
+        )
 
         with open(csv_file, "w", newline="") as f:
             writer = csv.writer(f)
@@ -606,6 +716,7 @@ def run_scan(
         }
 
     except Exception as e:
+        _emit_progress(progress_callback, "error", f"3D scan error: {str(e)}")
         result = {
             "success": False,
             "stopped": False,
@@ -663,6 +774,21 @@ def run_scan(
         result["scan_quality"]["reset_completed"] = reset_completed
         if reset_error:
             result["scan_quality"]["reset_error"] = reset_error
+
+        if result.get("success"):
+            _emit_progress(
+                progress_callback,
+                "completed",
+                f"3D scan complete: {result.get('point_count', 0)} points",
+                point_count=result.get("point_count", 0),
+            )
+        elif result.get("stopped"):
+            _emit_progress(
+                progress_callback,
+                "stopped",
+                result.get("message", "Scan stopped by user"),
+                point_count=result.get("point_count", 0),
+            )
 
     return result
 
