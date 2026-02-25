@@ -8,6 +8,7 @@ __pycache__/
 venv/
 env/
 ENV/
+.venv/
 
 # IDE
 .vscode/
@@ -23,4 +24,5 @@ Thumbs.db
 # Config Files ***DO NOT PUSH SENSITIVE INFORMATION***
 config_rpi.yaml
 config_laptop.yaml
-
+pyvenv.cfg
+python.exe
