@@ -114,6 +114,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p_step.add_argument("direction", choices=["cw", "ccw"], help="Rotation direction.")
     p_step.add_argument("degrees", type=float, help="Step size in degrees (positive).")
 
+    p_drive = sub.add_parser(
+        "drive",
+        help="Drive servo with a raw gpiozero value for direct direction testing.",
+    )
+    p_drive.add_argument(
+        "value",
+        type=float,
+        help="Raw Servo value (-1.0..1.0). Positive and negative should spin opposite directions.",
+    )
+    p_drive.add_argument(
+        "seconds",
+        type=float,
+        help="Drive duration in seconds (>0).",
+    )
+
     sub.add_parser(
         "status",
         help="Print current stored azimuth estimate.",
@@ -198,6 +213,28 @@ def main() -> int:
             print("Zero reference set.")
             print("  current physical position is now treated as 0.0°")
             print(f"  state file: {args.state_file}")
+            return 0
+
+        # raw drive command (direct calibration/debug)
+        if args.command == "drive":
+            drive_value = max(-1.0, min(1.0, float(args.value)))
+            seconds = float(args.seconds)
+            if seconds <= 0:
+                print("ERROR: drive seconds must be > 0")
+                return 2
+
+            print("Drive command")
+            print(f"  value: {drive_value:.3f}")
+            print(f"  seconds: {seconds:.3f}s")
+            print(f"  neutral: {neutral_value:.3f}")
+
+            servo.value = drive_value
+            time.sleep(seconds)
+            servo.value = neutral_value
+            if stop_settle > 0:
+                time.sleep(stop_settle)
+
+            print("Done.")
             return 0
 
         # step command
