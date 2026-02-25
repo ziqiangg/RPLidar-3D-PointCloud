@@ -32,6 +32,7 @@ SERVO_MAX_ANGLE = 180.0
 DEFAULT_COMMAND_ANGLE = 90.0
 DEFAULT_SWEEP_STEP = 1.0
 DEFAULT_SWEEP_DELAY_SEC = 0.01
+DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG = 1.0
 
 
 def _safe_float(value: Any, default: float) -> float:
@@ -115,6 +116,28 @@ def _angle_to_servo_value(angle_deg: float) -> float:
     return (_clamp_angle(angle_deg) - 90.0) / 90.0
 
 
+def _resolve_pulse_widths(servo_cfg: Dict[str, Any]) -> tuple[float, float]:
+    """
+    Resolve pulse-width range for set_servo_azimuth calibration moves.
+
+    Preference order:
+    1) servo.continuous.{min,max}_pulse_width (explicit calibration range)
+    2) servo.{min,max}_pulse_width
+    """
+    continuous_cfg = _safe_dict(servo_cfg.get("continuous"))
+    min_pulse = _safe_float(
+        continuous_cfg.get("min_pulse_width", servo_cfg.get("min_pulse_width", 0.001)),
+        0.001,
+    )
+    max_pulse = _safe_float(
+        continuous_cfg.get("max_pulse_width", servo_cfg.get("max_pulse_width", 0.002)),
+        0.002,
+    )
+    if min_pulse > max_pulse:
+        min_pulse, max_pulse = max_pulse, min_pulse
+    return min_pulse, max_pulse
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Simple servo step calibrator (servotest-style positional control)."
@@ -133,8 +156,20 @@ def main() -> int:
     state = _load_state(STATE_FILE)
 
     if args.command == "status":
+        cfg = _load_yaml(CONFIG_PATH)
+        servo_cfg = _safe_dict(cfg.get("servo"))
+        calib_cfg = _safe_dict(servo_cfg.get("calibration"))
+        min_pulse, max_pulse = _resolve_pulse_widths(servo_cfg)
+        physical_deg_per_command_deg = _safe_float(
+            calib_cfg.get("physical_deg_per_command_deg", DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG),
+            DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG,
+        )
+        if physical_deg_per_command_deg <= 0:
+            physical_deg_per_command_deg = DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG
         print(f"Logical azimuth: {state['logical_azimuth_deg']:.1f}°")
         print(f"Command angle: {state['command_angle_deg']:.1f}°")
+        print(f"physical_deg_per_command_deg: {physical_deg_per_command_deg:.4f}")
+        print(f"Pulse range: {min_pulse * 1e6:.0f}us -> {max_pulse * 1e6:.0f}us")
         print(f"State file: {STATE_FILE}")
         return 0
 
@@ -157,13 +192,18 @@ def main() -> int:
     cfg = _load_yaml(CONFIG_PATH)
     servo_cfg = _safe_dict(cfg.get("servo"))
     pin = _safe_int(servo_cfg.get("pin", 18), 18)
-    min_pulse = _safe_float(servo_cfg.get("min_pulse_width", 0.001), 0.001)
-    max_pulse = _safe_float(servo_cfg.get("max_pulse_width", 0.002), 0.002)
+    min_pulse, max_pulse = _resolve_pulse_widths(servo_cfg)
 
     calib_cfg = _safe_dict(servo_cfg.get("calibration"))
     cw_increases_angle = _safe_bool(calib_cfg.get("cw_increases_angle", True), True)
     sweep_step = max(0.1, _safe_float(calib_cfg.get("sweep_step_deg", DEFAULT_SWEEP_STEP), DEFAULT_SWEEP_STEP))
     sweep_delay = max(0.0, _safe_float(calib_cfg.get("sweep_delay_sec", DEFAULT_SWEEP_DELAY_SEC), DEFAULT_SWEEP_DELAY_SEC))
+    physical_deg_per_command_deg = _safe_float(
+        calib_cfg.get("physical_deg_per_command_deg", DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG),
+        DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG,
+    )
+    if physical_deg_per_command_deg <= 0:
+        physical_deg_per_command_deg = DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG
 
     current_cmd_angle = _clamp_angle(state["command_angle_deg"])
     current_logical = _wrap_360(state["logical_azimuth_deg"])
@@ -176,7 +216,8 @@ def main() -> int:
         cmd_sign = -1.0 if cw_increases_angle else 1.0
         logical_sign = -1.0
 
-    target_cmd_angle = _clamp_angle(current_cmd_angle + cmd_sign * step_deg)
+    requested_cmd_delta = step_deg / physical_deg_per_command_deg
+    target_cmd_angle = _clamp_angle(current_cmd_angle + cmd_sign * requested_cmd_delta)
     actual_cmd_delta = target_cmd_angle - current_cmd_angle
     if abs(actual_cmd_delta) < 1e-9:
         print("No movement (already at command-angle limit).")
@@ -184,7 +225,7 @@ def main() -> int:
         return 0
 
     # Adjust logical delta to reflect clamp-limited actual movement.
-    actual_logical_delta = abs(actual_cmd_delta) * logical_sign
+    actual_logical_delta = abs(actual_cmd_delta) * physical_deg_per_command_deg * logical_sign
     next_logical = _wrap_360(current_logical + actual_logical_delta)
 
     servo = None
@@ -212,9 +253,12 @@ def main() -> int:
 
         print("Step executed.")
         print(f"  direction: {direction}")
-        print(f"  requested step: {step_deg:.1f}°")
+        print(f"  requested physical step: {step_deg:.1f}°")
         print(f"  logical: {current_logical:.1f}° -> {next_logical:.1f}°")
         print(f"  command angle: {current_cmd_angle:.1f}° -> {target_cmd_angle:.1f}°")
+        print(f"  command delta applied: {actual_cmd_delta:+.1f}°")
+        print(f"  physical_deg_per_command_deg: {physical_deg_per_command_deg:.4f}")
+        print(f"  pulse range: {min_pulse * 1e6:.0f}us -> {max_pulse * 1e6:.0f}us")
         print(f"  cw_increases_angle: {cw_increases_angle}")
         return 0
 
