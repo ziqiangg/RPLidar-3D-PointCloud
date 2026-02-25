@@ -81,9 +81,9 @@ class ServoFS90:
             pin_factory=factory,
         )
 
-    def set_angle(self, angle: int):
+    def set_angle(self, angle: float):
         """Set servo angle, clamped to [0, 180]."""
-        clamped = max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, int(angle)))
+        clamped = max(float(SERVO_MIN_ANGLE), min(float(SERVO_MAX_ANGLE), float(angle)))
         value = (clamped - 90) / 90.0  # 0° -> -1, 90° -> 0, 180° -> 1
         self.servo.value = value
 
@@ -348,11 +348,32 @@ def build_sweep_angles(start_angle: int, end_angle: int, step_angle: int) -> Lis
     return list(range(start_angle, end_angle - 1, -step))
 
 
+def build_physical_sweep_angles(
+    count: int,
+    physical_start: float,
+    physical_end: float
+) -> List[float]:
+    """
+    Build calibrated physical servo angles for the logical slice count.
+    """
+    if count <= 0:
+        return []
+    if count == 1:
+        return [float(physical_start)]
+
+    angles: List[float] = []
+    for i in range(count):
+        ratio = i / (count - 1)
+        angle = physical_start + (physical_end - physical_start) * ratio
+        angles.append(angle)
+    return angles
+
+
 def reset_servo_reverse(
     servo: ServoFS90,
-    current_angle: int,
-    start_angle: int,
-    step_angle: int,
+    current_angle: float,
+    start_angle: float,
+    step_angle: float,
     settle_time: float,
 ):
     """
@@ -360,18 +381,24 @@ def reset_servo_reverse(
 
     Example: sweep 0 -> 180 (increasing) resets via decreasing angles.
     """
-    step = max(1, abs(step_angle))
+    step = max(0.1, abs(float(step_angle)))
+    current = float(current_angle)
+    start = float(start_angle)
 
-    if current_angle > start_angle:
-        for angle in range(current_angle - step, start_angle - 1, -step):
+    if current > start:
+        angle = current - step
+        while angle > start:
             servo.set_angle(angle)
             time.sleep(settle_time)
-    elif current_angle < start_angle:
-        for angle in range(current_angle + step, start_angle + 1, step):
+            angle -= step
+    elif current < start:
+        angle = current + step
+        while angle < start:
             servo.set_angle(angle)
             time.sleep(settle_time)
+            angle += step
 
-    servo.set_angle(start_angle)
+    servo.set_angle(start)
     time.sleep(settle_time)
 
 
@@ -428,6 +455,25 @@ def run_scan(
     azimuth_step = max(1, abs(_safe_int(scan_config.get("azimuth_step", AZIMUTH_STEP), AZIMUTH_STEP)))
     azimuth_start = max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, azimuth_start))
     azimuth_end = max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, azimuth_end))
+    sweep_angles = build_sweep_angles(azimuth_start, azimuth_end, azimuth_step)
+
+    # Physical calibration range for servo motion.
+    # Logical azimuth remains 0..180, but physical motion can avoid end stops.
+    servo_scan_start_angle = _safe_float(
+        servo_config.get("scan_start_angle", float(sweep_angles[0]) if sweep_angles else float(azimuth_start)),
+        float(sweep_angles[0]) if sweep_angles else float(azimuth_start),
+    )
+    servo_scan_end_angle = _safe_float(
+        servo_config.get("scan_end_angle", float(sweep_angles[-1]) if sweep_angles else float(azimuth_end)),
+        float(sweep_angles[-1]) if sweep_angles else float(azimuth_end),
+    )
+    servo_scan_start_angle = max(float(SERVO_MIN_ANGLE), min(float(SERVO_MAX_ANGLE), servo_scan_start_angle))
+    servo_scan_end_angle = max(float(SERVO_MIN_ANGLE), min(float(SERVO_MAX_ANGLE), servo_scan_end_angle))
+    physical_sweep_angles = build_physical_sweep_angles(
+        len(sweep_angles),
+        servo_scan_start_angle,
+        servo_scan_end_angle,
+    )
 
     min_angle_resolution = max(
         0.1,
@@ -474,8 +520,7 @@ def run_scan(
     lidar = None
     scan_iterator = None
     servo = None
-    sweep_angles: List[int] = []
-    current_angle = azimuth_start
+    current_angle = servo_scan_start_angle
     reset_completed = False
     reset_error = None
 
@@ -521,7 +566,6 @@ def run_scan(
         time.sleep(2)
         scan_iterator = lidar.iter_scans(max_buf_meas=buffer_size, min_len=50)
 
-        sweep_angles = build_sweep_angles(azimuth_start, azimuth_end, azimuth_step)
         if not sweep_angles:
             result["error"] = "No sweep angles generated"
             result["message"] = "3D scan failed: no sweep angles generated"
@@ -535,16 +579,21 @@ def run_scan(
             azimuth_start=azimuth_start,
             azimuth_end=azimuth_end,
             azimuth_step=azimuth_step,
+            physical_start=physical_sweep_angles[0],
+            physical_end=physical_sweep_angles[-1],
         )
 
         # Set the scan reference start azimuth (0° by default).
-        servo.set_angle(sweep_angles[0])
-        current_angle = sweep_angles[0]
+        servo.set_angle(physical_sweep_angles[0])
+        current_angle = physical_sweep_angles[0]
         time.sleep(servo_settle_time)
         if release_after_move:
             servo.release()
 
-        for slice_index, angle in enumerate(sweep_angles, start=1):
+        for slice_index, (angle, physical_angle) in enumerate(
+            zip(sweep_angles, physical_sweep_angles),
+            start=1,
+        ):
             if _is_stop_requested(should_stop):
                 _emit_progress(
                     progress_callback,
@@ -577,15 +626,19 @@ def run_scan(
                 _emit_progress(
                     progress_callback,
                     "slice_start",
-                    f"Scanning slice {slice_index}/{len(sweep_angles)} at azimuth {angle}°",
+                    (
+                        f"Scanning slice {slice_index}/{len(sweep_angles)} "
+                        f"at azimuth {angle}° (servo {physical_angle:.1f}°)"
+                    ),
                     slice_index=slice_index,
                     total_slices=len(sweep_angles),
                     angle=angle,
+                    servo_angle=physical_angle,
                     point_count=len(all_points_3d),
                 )
 
-            servo.set_angle(angle)
-            current_angle = angle
+            servo.set_angle(physical_angle)
+            current_angle = physical_angle
             time.sleep(servo_settle_time)
             if release_after_move:
                 servo.release()
@@ -635,10 +688,14 @@ def run_scan(
                     _emit_progress(
                         progress_callback,
                         "slice_failed",
-                        f"Slice {slice_index}/{len(sweep_angles)} failed at {angle}°",
+                        (
+                            f"Slice {slice_index}/{len(sweep_angles)} failed "
+                            f"at azimuth {angle}° (servo {physical_angle:.1f}°)"
+                        ),
                         slice_index=slice_index,
                         total_slices=len(sweep_angles),
                         angle=angle,
+                        servo_angle=physical_angle,
                         point_count=len(all_points_3d),
                     )
                 continue
@@ -661,12 +718,14 @@ def run_scan(
                     "slice_done",
                     (
                         f"Slice {slice_index}/{len(sweep_angles)} done "
-                        f"(az={angle}°, cov={slice_result['coverage'] * 100:.1f}%, "
+                        f"(az={angle}°, servo={physical_angle:.1f}°, "
+                        f"cov={slice_result['coverage'] * 100:.1f}%, "
                         f"total_pts={len(all_points_3d)})"
                     ),
                     slice_index=slice_index,
                     total_slices=len(sweep_angles),
                     angle=angle,
+                    servo_angle=physical_angle,
                     point_count=len(all_points_3d),
                 )
 
@@ -744,6 +803,8 @@ def run_scan(
                 "azimuth_start": azimuth_start,
                 "azimuth_end": azimuth_end,
                 "azimuth_step": azimuth_step,
+                "servo_scan_start_angle": physical_sweep_angles[0],
+                "servo_scan_end_angle": physical_sweep_angles[-1],
             },
         }
 
@@ -770,8 +831,8 @@ def run_scan(
                 reset_servo_reverse(
                     servo=servo,
                     current_angle=current_angle,
-                    start_angle=azimuth_start,
-                    step_angle=azimuth_step,
+                    start_angle=physical_sweep_angles[0] if physical_sweep_angles else servo_scan_start_angle,
+                    step_angle=abs(servo_scan_end_angle - servo_scan_start_angle) / max(1, len(sweep_angles) - 1),
                     settle_time=reset_settle_time,
                 )
                 reset_completed = True
