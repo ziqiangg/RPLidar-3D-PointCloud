@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Move FS90 servo to a requested azimuth.
+Continuous-servo azimuth calibration helper.
 
-By default, the provided azimuth is a logical scan azimuth (0..180) and is
-mapped to the configured physical servo range:
-    servo.scan_start_angle -> servo.scan_end_angle
+This script keeps a software azimuth estimate and lets you:
+1) Set current physical position as 0 degrees
+2) Step by N degrees in a chosen direction (cw/ccw)
 
-Use --physical to bypass mapping and command the given angle directly.
+State is stored in a small JSON file (default: /tmp/servo_azimuth_state.json).
 """
 
 import argparse
@@ -25,15 +25,15 @@ except Exception:  # pragma: no cover - expected outside Raspberry Pi
     LGPIOFactory = None
 
 
-SERVO_MIN_ANGLE = 0.0
-SERVO_MAX_ANGLE = 180.0
-DEFAULT_HOLD_SECONDS = 1.0
+DEFAULT_CONFIG_PATH = "config_rpi.yaml"
 DEFAULT_STATE_FILE = "/tmp/servo_azimuth_state.json"
+
 DEFAULT_NEUTRAL_VALUE = 0.0
 DEFAULT_CW_VALUE = 0.35
 DEFAULT_CCW_VALUE = -0.35
 DEFAULT_DEG_PER_SEC_CW = 120.0
 DEFAULT_DEG_PER_SEC_CCW = 120.0
+DEFAULT_STOP_SETTLE_SECONDS = 0.10
 
 
 def _safe_float(value: Any, default: float) -> float:
@@ -50,174 +50,134 @@ def _safe_int(value: Any, default: int) -> int:
         return default
 
 
-def _clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))
-
-
-def _load_config(config_path: str) -> Dict[str, Any]:
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f) or {}
-
-
 def _safe_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _map_logical_to_physical(logical_azimuth: float, servo_cfg: Dict[str, Any]) -> float:
-    logical = _clamp(float(logical_azimuth), SERVO_MIN_ANGLE, SERVO_MAX_ANGLE)
-    physical_start = _safe_float(servo_cfg.get("scan_start_angle", 0.0), 0.0)
-    physical_end = _safe_float(servo_cfg.get("scan_end_angle", 180.0), 180.0)
-    physical_start = _clamp(physical_start, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE)
-    physical_end = _clamp(physical_end, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE)
-
-    ratio = (logical - SERVO_MIN_ANGLE) / (SERVO_MAX_ANGLE - SERVO_MIN_ANGLE)
-    physical = physical_start + (physical_end - physical_start) * ratio
-    return _clamp(physical, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE)
-
-
-def _angle_to_servo_value(angle_deg: float) -> float:
-    # gpiozero Servo value range: -1 .. +1
-    return (angle_deg - 90.0) / 90.0
-
-
 def _wrap_360(deg: float) -> float:
     wrapped = float(deg) % 360.0
-    # Keep 360 represented as 0 to avoid duplicate state semantics.
     if abs(wrapped - 360.0) < 1e-9:
         return 0.0
     return wrapped
 
 
-def _shortest_delta_deg(current: float, target: float) -> float:
-    """
-    Signed shortest delta from current -> target in degrees.
-
-    Positive: clockwise
-    Negative: anticlockwise
-    """
-    delta = (target - current + 540.0) % 360.0 - 180.0
-    if abs(delta + 180.0) < 1e-9:
-        return 180.0
-    return delta
+def _load_yaml(path: str) -> Dict[str, Any]:
+    with open(path, "r") as f:
+        return yaml.safe_load(f) or {}
 
 
-def _load_state_angle(state_file: str) -> float | None:
+def _load_state(path: str) -> float:
     try:
-        with open(state_file, "r") as f:
+        with open(path, "r") as f:
             data = json.load(f)
-        if not isinstance(data, dict):
-            return None
-        angle = data.get("azimuth_deg")
-        if angle is None:
-            return None
-        return _wrap_360(float(angle))
-    except Exception:
-        return None
-
-
-def _save_state_angle(state_file: str, azimuth_deg: float):
-    try:
-        state_dir = os.path.dirname(state_file)
-        if state_dir:
-            os.makedirs(state_dir, exist_ok=True)
-        with open(state_file, "w") as f:
-            json.dump({"azimuth_deg": _wrap_360(azimuth_deg)}, f)
+        if isinstance(data, dict) and "azimuth_deg" in data:
+            return _wrap_360(float(data["azimuth_deg"]))
     except Exception:
         pass
+    return 0.0
 
 
-def parse_args() -> argparse.Namespace:
+def _save_state(path: str, azimuth_deg: float):
+    state_dir = os.path.dirname(path)
+    if state_dir:
+        os.makedirs(state_dir, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"azimuth_deg": _wrap_360(azimuth_deg)}, f)
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Move servo to a target azimuth using config_rpi.yaml settings."
-    )
-    parser.add_argument(
-        "azimuth",
-        type=float,
-        help="Target azimuth in degrees (default: logical azimuth 0..180).",
-    )
-    parser.add_argument(
-        "--physical",
-        action="store_true",
-        help="Treat azimuth as direct physical servo angle (skip logical mapping).",
-    )
-    parser.add_argument(
-        "--continuous",
-        action="store_true",
-        help=(
-            "Use continuous-rotation mode (0..360 target). "
-            "This is timed movement using calibration, not true encoder positioning."
-        ),
+        description="Calibrate continuous-servo azimuth (zero + directional steps)."
     )
     parser.add_argument(
         "--config",
-        default="config_rpi.yaml",
-        help="Path to Raspberry Pi config file (default: config_rpi.yaml).",
-    )
-    parser.add_argument(
-        "--hold-seconds",
-        type=float,
-        default=None,
-        help=(
-            "Time to hold before optional release. "
-            "Default: max(servo.settle_time, 1.0s)."
-        ),
-    )
-    parser.add_argument(
-        "--release-after-move",
-        action="store_true",
-        help="Release PWM after hold (default keeps PWM active until script exits).",
-    )
-    parser.add_argument(
-        "--current-azimuth",
-        type=float,
-        default=None,
-        help=(
-            "Current azimuth estimate (degrees, continuous mode). "
-            "If omitted, uses saved state, else assumes 0°."
-        ),
+        default=DEFAULT_CONFIG_PATH,
+        help=f"Path to config file (default: {DEFAULT_CONFIG_PATH})",
     )
     parser.add_argument(
         "--state-file",
         default=DEFAULT_STATE_FILE,
-        help=f"Path for saved azimuth state in continuous mode (default: {DEFAULT_STATE_FILE}).",
+        help=f"Path to azimuth state file (default: {DEFAULT_STATE_FILE})",
     )
-    parser.add_argument(
-        "--wait-for-enter",
-        action="store_true",
-        help="Wait for Enter before cleanup so position can be inspected.",
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser(
+        "zero",
+        help="Set current physical position as azimuth 0° (no rotation).",
     )
-    return parser.parse_args()
+
+    p_step = sub.add_parser(
+        "step",
+        help="Rotate by N degrees in chosen direction and update azimuth estimate.",
+    )
+    p_step.add_argument("direction", choices=["cw", "ccw"], help="Rotation direction.")
+    p_step.add_argument("degrees", type=float, help="Step size in degrees (positive).")
+
+    sub.add_parser(
+        "status",
+        help="Print current stored azimuth estimate.",
+    )
+
+    return parser
 
 
 def main() -> int:
-    args = parse_args()
+    args = _build_parser().parse_args()
+
+    if args.command == "status":
+        current = _load_state(args.state_file)
+        print(f"Current azimuth estimate: {current:.1f}°")
+        print(f"State file: {args.state_file}")
+        return 0
 
     if Servo is None or LGPIOFactory is None:
-        print("ERROR: gpiozero/lgpio not available. Run this on Raspberry Pi with dependencies installed.")
+        print("ERROR: gpiozero/lgpio not available. Run this on Raspberry Pi.")
         return 1
 
-    cfg = _load_config(args.config)
-    servo_cfg = cfg.get("servo", {}) if isinstance(cfg, dict) else {}
-    servo_cfg = _safe_dict(servo_cfg)
-    continuous_cfg = _safe_dict(servo_cfg.get("continuous", {}))
+    cfg = _load_yaml(args.config)
+    servo_cfg = _safe_dict(cfg.get("servo"))
+    continuous_cfg = _safe_dict(servo_cfg.get("continuous"))
 
     pin = _safe_int(servo_cfg.get("pin", 18), 18)
     min_pulse = _safe_float(servo_cfg.get("min_pulse_width", 0.001), 0.001)
     max_pulse = _safe_float(servo_cfg.get("max_pulse_width", 0.002), 0.002)
-    settle_time = max(0.0, _safe_float(servo_cfg.get("settle_time", 0.08), 0.08))
-    hold_seconds = (
-        max(settle_time, DEFAULT_HOLD_SECONDS)
-        if args.hold_seconds is None
-        else max(0.0, float(args.hold_seconds))
+
+    neutral_value = _safe_float(
+        continuous_cfg.get("neutral_value", DEFAULT_NEUTRAL_VALUE),
+        DEFAULT_NEUTRAL_VALUE,
     )
-    release_after_move = bool(args.release_after_move)
+    cw_value = _safe_float(
+        continuous_cfg.get("cw_value", DEFAULT_CW_VALUE),
+        DEFAULT_CW_VALUE,
+    )
+    ccw_value = _safe_float(
+        continuous_cfg.get("ccw_value", DEFAULT_CCW_VALUE),
+        DEFAULT_CCW_VALUE,
+    )
+    deg_per_sec_cw = max(
+        0.1,
+        _safe_float(
+            continuous_cfg.get("deg_per_sec_cw", DEFAULT_DEG_PER_SEC_CW),
+            DEFAULT_DEG_PER_SEC_CW,
+        ),
+    )
+    deg_per_sec_ccw = max(
+        0.1,
+        _safe_float(
+            continuous_cfg.get("deg_per_sec_ccw", DEFAULT_DEG_PER_SEC_CCW),
+            DEFAULT_DEG_PER_SEC_CCW,
+        ),
+    )
+    stop_settle = max(
+        0.0,
+        _safe_float(
+            continuous_cfg.get("stop_settle_seconds", DEFAULT_STOP_SETTLE_SECONDS),
+            DEFAULT_STOP_SETTLE_SECONDS,
+        ),
+    )
 
-    requested = float(args.azimuth)
-
-    print("Servo move request")
-    print(f"  pin: {pin}")
-    print(f"  mode: {'continuous' if args.continuous else 'positional'}")
-
+    current_az = _load_state(args.state_file)
     servo = None
     try:
         factory = LGPIOFactory()
@@ -228,109 +188,49 @@ def main() -> int:
             pin_factory=factory,
         )
 
-        if args.continuous:
-            neutral_value = _safe_float(
-                continuous_cfg.get("neutral_value", DEFAULT_NEUTRAL_VALUE),
-                DEFAULT_NEUTRAL_VALUE,
-            )
-            cw_value = _safe_float(
-                continuous_cfg.get("cw_value", DEFAULT_CW_VALUE),
-                DEFAULT_CW_VALUE,
-            )
-            ccw_value = _safe_float(
-                continuous_cfg.get("ccw_value", DEFAULT_CCW_VALUE),
-                DEFAULT_CCW_VALUE,
-            )
-            deg_per_sec_cw = max(
-                0.1,
-                _safe_float(
-                    continuous_cfg.get("deg_per_sec_cw", DEFAULT_DEG_PER_SEC_CW),
-                    DEFAULT_DEG_PER_SEC_CW,
-                ),
-            )
-            deg_per_sec_ccw = max(
-                0.1,
-                _safe_float(
-                    continuous_cfg.get("deg_per_sec_ccw", DEFAULT_DEG_PER_SEC_CCW),
-                    DEFAULT_DEG_PER_SEC_CCW,
-                ),
-            )
+        # Force neutral before any calibration action.
+        servo.value = neutral_value
+        if stop_settle > 0:
+            time.sleep(stop_settle)
 
-            target_az = _wrap_360(requested)
-            if args.current_azimuth is not None:
-                current_az = _wrap_360(float(args.current_azimuth))
-                current_source = "--current-azimuth"
-            else:
-                saved = _load_state_angle(args.state_file)
-                if saved is not None:
-                    current_az = saved
-                    current_source = f"state file ({args.state_file})"
-                else:
-                    current_az = 0.0
-                    current_source = "default 0.0°"
+        if args.command == "zero":
+            _save_state(args.state_file, 0.0)
+            print("Zero reference set.")
+            print("  current physical position is now treated as 0.0°")
+            print(f"  state file: {args.state_file}")
+            return 0
 
-            delta = _shortest_delta_deg(current_az, target_az)
-            rotate_deg = abs(delta)
-            if rotate_deg < 0.01:
-                direction = "none"
-                drive_value = neutral_value
-                duration = 0.0
-            elif delta > 0:
-                direction = "clockwise"
-                drive_value = cw_value
-                duration = rotate_deg / deg_per_sec_cw
-            else:
-                direction = "anticlockwise"
-                drive_value = ccw_value
-                duration = rotate_deg / deg_per_sec_ccw
+        # step command
+        step_deg = float(args.degrees)
+        if step_deg <= 0:
+            print("ERROR: step degrees must be > 0")
+            return 2
 
-            print(f"  target azimuth: {target_az:.1f}° (0..360)")
-            print(f"  current azimuth estimate: {current_az:.1f}° ({current_source})")
-            print(f"  planned direction: {direction}")
-            print(f"  planned rotation: {rotate_deg:.1f}°")
-            print(f"  drive value: {drive_value:.3f}")
-            print(f"  drive duration: {duration:.3f}s")
-            print(f"  release after move: {release_after_move}")
-            print("  note: this is timed control; calibrate deg_per_sec_* for your servo.")
-
-            # Stop first, then drive, then stop.
-            servo.value = neutral_value
-            time.sleep(0.1)
-            if duration > 0:
-                servo.value = drive_value
-                time.sleep(duration)
-                servo.value = neutral_value
-                time.sleep(0.1)
-            _save_state_angle(args.state_file, target_az)
-
-            if args.wait_for_enter:
-                input("Press Enter to release/exit...")
+        direction = str(args.direction)
+        if direction == "cw":
+            drive_value = cw_value
+            duration = step_deg / deg_per_sec_cw
+            next_az = _wrap_360(current_az + step_deg)
         else:
-            requested = _clamp(requested, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE)
-            if args.physical:
-                physical = requested
-                logical_info = "n/a (physical mode)"
-            else:
-                physical = _map_logical_to_physical(requested, servo_cfg)
-                logical_info = f"{requested:.1f}°"
+            drive_value = ccw_value
+            duration = step_deg / deg_per_sec_ccw
+            next_az = _wrap_360(current_az - step_deg)
 
-            print(f"  logical azimuth: {logical_info}")
-            print(f"  physical angle: {physical:.1f}°")
-            print(f"  hold seconds: {hold_seconds:.2f}")
-            print(f"  release after move: {release_after_move}")
-            if abs(physical - 90.0) < 0.01:
-                print("  note: 90° is center; if servo is already centered, movement may be minimal.")
-            print("  note: positional mode assumes 0..180 degree servo response.")
+        print("Step command")
+        print(f"  direction: {direction}")
+        print(f"  step: {step_deg:.1f}°")
+        print(f"  current estimate: {current_az:.1f}°")
+        print(f"  next estimate: {next_az:.1f}°")
+        print(f"  drive value: {drive_value:.3f}")
+        print(f"  drive duration: {duration:.3f}s")
 
-            servo.value = _angle_to_servo_value(physical)
-            time.sleep(hold_seconds)
+        servo.value = drive_value
+        time.sleep(duration)
+        servo.value = neutral_value
+        if stop_settle > 0:
+            time.sleep(stop_settle)
 
-            if args.wait_for_enter:
-                input("Press Enter to release/exit...")
-
-        if release_after_move:
-            servo.value = None
-
+        _save_state(args.state_file, next_az)
         print("Done.")
         return 0
 
@@ -342,6 +242,10 @@ def main() -> int:
         return 1
     finally:
         if servo is not None:
+            try:
+                servo.value = None
+            except Exception:
+                pass
             try:
                 servo.close()
             except Exception:
