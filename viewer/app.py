@@ -50,6 +50,7 @@ class RPLidarViewerApp:
         self.info_label = None
         self.viz_status_label = None
         self.scan_status_label = None
+        self.step_scan_btn = None
         
         # State
         self.current_file = None
@@ -154,6 +155,11 @@ class RPLidarViewerApp:
         self.stop_scan_btn.set_on_clicked(self._on_stop_scan)
         self.stop_scan_btn.enabled = False
         button_panel.add_child(self.stop_scan_btn)
+
+        self.step_scan_btn = gui.Button("Step Scan")
+        self.step_scan_btn.set_on_clicked(self._on_step_scan)
+        self.step_scan_btn.enabled = False
+        button_panel.add_child(self.step_scan_btn)
         
         button_panel.add_stretch()
         tab.add_child(button_panel)
@@ -291,6 +297,7 @@ class RPLidarViewerApp:
         print("[DEBUG] Disabling start button, enabling stop button")
         self.start_scan_btn.enabled = False
         self.stop_scan_btn.enabled = True
+        self.step_scan_btn.enabled = False
         
         # Start scan
         print(f"[DEBUG] Starting scan with type={scan_type}, params={params}")
@@ -301,6 +308,7 @@ class RPLidarViewerApp:
             print("[DEBUG] Scan failed to start, restoring button state")
             self.start_scan_btn.enabled = True
             self.stop_scan_btn.enabled = False
+            self.step_scan_btn.enabled = False
 
     def _on_scan_type_2d_checked(self, checked: bool):
         """Keep scan type selection mutually exclusive."""
@@ -322,6 +330,13 @@ class RPLidarViewerApp:
         self.scan_controller.stop_scan()
         self.start_scan_btn.enabled = True
         self.stop_scan_btn.enabled = False
+        self.step_scan_btn.enabled = False
+
+    def _on_step_scan(self):
+        """Handle step scan button click."""
+        print("[DEBUG] Step scan button clicked")
+        self.scan_controller.step_scan()
+        self.step_scan_btn.enabled = False
     
     def _on_scan_status(self, status: str, message: str):
         """Callback for scan status updates."""
@@ -330,11 +345,16 @@ class RPLidarViewerApp:
             print(f"[DEBUG] Updating scan status label...")
             if self.scan_status_label:
                 self.scan_status_label.text = f"Status: {status} - {message}"
-            
+
+            waiting_for_step = status == "started" and "Awaiting step permission" in message
+            if self.step_scan_btn:
+                self.step_scan_btn.enabled = waiting_for_step
+
             if status in ["completed", "error", "stopped"]:
                 print(f"[DEBUG] Scan finished, re-enabling buttons")
                 self.start_scan_btn.enabled = True
                 self.stop_scan_btn.enabled = False
+                self.step_scan_btn.enabled = False
         
         gui.Application.instance.post_to_main_thread(self.window, update)
     

@@ -21,6 +21,7 @@ from mqtt_protocol import (
     Topics,
     ScanCommand,
     StopCommand,
+    StepCommand,
     ScanStatus,
     DataMessage,
     MessageDecoder
@@ -146,6 +147,17 @@ class LaptopViewerClient(MQTTClientBase):
         command = StopCommand(scan_id=scan_id)
         self.logger.info(f"Requesting stop for scan: {scan_id}")
         self.publish(Topics.COMMAND_STOP, command.to_json())
+
+    def step_scan(self, scan_id: str):
+        """
+        Allow one step in a running 3D scan.
+
+        Args:
+            scan_id: ID of active 3D scan
+        """
+        command = StepCommand(scan_id=scan_id)
+        self.logger.info(f"Requesting step for scan: {scan_id}")
+        self.publish(Topics.COMMAND_STEP, command.to_json())
     
     def _handle_status_message(self, topic: str, payload: bytes):
         """Handle incoming status message."""

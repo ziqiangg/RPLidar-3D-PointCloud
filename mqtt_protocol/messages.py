@@ -72,6 +72,28 @@ class StopCommand:
 
 
 @dataclass
+class StepCommand:
+    """
+    Command to allow one step in a running 3D scan.
+
+    Published by: Laptop
+    Subscribed by: Raspberry Pi
+    Topic: rplidar/commands/step
+    """
+    scan_id: str
+
+    def to_json(self) -> str:
+        """Serialize to JSON string."""
+        return json.dumps(asdict(self))
+
+    @classmethod
+    def from_json(cls, json_str: str) -> 'StepCommand':
+        """Deserialize from JSON string."""
+        data = json.loads(json_str)
+        return cls(**data)
+
+
+@dataclass
 class ScanStatus:
     """
     Status message for scan lifecycle and progress.
@@ -244,6 +266,12 @@ class MessageDecoder:
         """Check if topic is a stop command."""
         from .topics import Topics
         return topic == Topics.COMMAND_STOP
+
+    @staticmethod
+    def is_step_command(topic: str) -> bool:
+        """Check if topic is a step command."""
+        from .topics import Topics
+        return topic == Topics.COMMAND_STEP
     
     @staticmethod
     def is_status_message(topic: str) -> bool:

@@ -148,6 +148,28 @@ class ScanController:
         except Exception as e:
             print(f"[SCAN] Error stopping scan: {e}")
             self._update_status("error", f"Error stopping scan: {e}")
+
+    def step_scan(self):
+        """Allow one step in the current 3D scan."""
+        if not self.scan_running or not self.current_scan_id:
+            print("[SCAN] No scan running to step")
+            return
+
+        if self.current_scan_type != config.SCAN_TYPE_3D:
+            print("[SCAN] Step ignored: current scan is not 3D")
+            return
+
+        if not self.mqtt_client:
+            self._update_status("error", "MQTT client not available")
+            return
+
+        try:
+            print(f"[SCAN] Requesting step for scan: {self.current_scan_id}")
+            self.mqtt_client.step_scan(self.current_scan_id)
+            self._update_status("started", "Step permission sent to Raspberry Pi")
+        except Exception as e:
+            print(f"[SCAN] Error sending step: {e}")
+            self._update_status("error", f"Error sending step: {e}")
     
     def is_running(self) -> bool:
         """Check if a scan is currently running."""
