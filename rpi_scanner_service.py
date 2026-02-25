@@ -60,6 +60,8 @@ class RPiScannerService(MQTTClientBase):
         self.scan_thread: Optional[threading.Thread] = None
         self.stop_requested = threading.Event()
         self.state_lock = threading.Lock()
+        self.active_lidar = None
+        self.active_servo = None
         
         self.logger.info("RPi Scanner Service initialized")
     
@@ -155,10 +157,18 @@ class RPiScannerService(MQTTClientBase):
 
             with self.state_lock:
                 active_scan = self.scan_running and self.current_scan_id == command.scan_id
+                active_lidar = self.active_lidar
 
             if active_scan:
                 self.stop_requested.set()
                 self.logger.info("Stop requested for active scan")
+                # Force-unblock long-running LiDAR reads so stop can complete quickly.
+                if active_lidar is not None:
+                    try:
+                        active_lidar.stop()
+                        self.logger.info("Issued hardware stop to active LiDAR")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to stop active LiDAR immediately: {e}")
             else:
                 self.logger.info("No matching scan to stop")
                 
@@ -241,6 +251,8 @@ class RPiScannerService(MQTTClientBase):
                 self.scan_running = False
                 self.current_scan_id = None
                 self.scan_thread = None
+                self.active_lidar = None
+                self.active_servo = None
             self.stop_requested.clear()
     
     def _run_scan_2d(self, port: str) -> dict:
@@ -360,6 +372,13 @@ class RPiScannerService(MQTTClientBase):
                 point_count = progress.get('point_count')
                 self._publish_started_status(scan_id, message, point_count=point_count)
 
+            def hardware_cb(kind: str, handle):
+                with self.state_lock:
+                    if kind == "lidar":
+                        self.active_lidar = handle
+                    elif kind == "servo":
+                        self.active_servo = handle
+
             # Execute scan directly (no subprocess)
             result = run_scan(
                 port=port,
@@ -367,7 +386,8 @@ class RPiScannerService(MQTTClientBase):
                 servo_config=servo_cfg,
                 scan_config=scan3d_cfg,
                 should_stop=self.stop_requested.is_set,
-                progress_callback=progress_cb
+                progress_callback=progress_cb,
+                hardware_callback=hardware_cb
             )
 
             if result.get('stopped'):

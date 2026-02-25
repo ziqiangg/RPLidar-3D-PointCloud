@@ -55,7 +55,7 @@ SERVO_RELEASE_AFTER_MOVE = True
 AZIMUTH_START = 0
 AZIMUTH_END = 180
 AZIMUTH_STEP = 1
-PROGRESS_EVERY_SLICES = 5
+PROGRESS_EVERY_SLICES = 1
 
 
 class ServoFS90:
@@ -363,6 +363,7 @@ def run_scan(
     scan_config: Optional[Dict] = None,
     should_stop: Optional[Callable[[], bool]] = None,
     progress_callback: Optional[Callable[[Dict], None]] = None,
+    hardware_callback: Optional[Callable[[str, object], None]] = None,
 ) -> Dict:
     """
     Execute automated 3D scan and return structured result.
@@ -481,8 +482,18 @@ def run_scan(
             min_pulse_width=min_pulse_width,
             max_pulse_width=max_pulse_width,
         )
+        if hardware_callback:
+            try:
+                hardware_callback("servo", servo)
+            except Exception:
+                pass
 
         lidar = RPLidar(port, baudrate=BAUD, timeout=3)
+        if hardware_callback:
+            try:
+                hardware_callback("lidar", lidar)
+            except Exception:
+                pass
         lidar.get_info()
         lidar.get_health()
         lidar.start_motor()
@@ -766,6 +777,16 @@ def run_scan(
                 pass
             try:
                 lidar.disconnect()
+            except Exception:
+                pass
+
+        if hardware_callback:
+            try:
+                hardware_callback("lidar", None)
+            except Exception:
+                pass
+            try:
+                hardware_callback("servo", None)
             except Exception:
                 pass
 

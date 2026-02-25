@@ -35,7 +35,7 @@ scan3d:
   max_scans_to_merge: 20
   plateau_patience: 5
   slice_timeout: 5.0
-  progress_every_slices: 5
+  progress_every_slices: 1
   buffer_size: 5000
   
 logging:
