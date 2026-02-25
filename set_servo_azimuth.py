@@ -6,6 +6,8 @@ Commands:
   zero                     Set current logical azimuth to 0°
   step <cw|ccw> <degrees>  Move by N degrees in direction
   status                   Show logical azimuth + command angle estimate
+  pulse <min_us> <max_us>  Override pulse range for calibration
+  pulse reset              Clear override and use config pulse range
 """
 
 import argparse
@@ -84,7 +86,12 @@ def _load_yaml(path: str) -> Dict[str, Any]:
 
 
 def _load_state(path: str) -> Dict[str, float]:
-    default = {"logical_azimuth_deg": 0.0, "command_angle_deg": DEFAULT_COMMAND_ANGLE}
+    default = {
+        "logical_azimuth_deg": 0.0,
+        "command_angle_deg": DEFAULT_COMMAND_ANGLE,
+        "pulse_min_width_s": None,
+        "pulse_max_width_s": None,
+    }
     try:
         with open(path, "r") as f:
             data = json.load(f)
@@ -92,23 +99,47 @@ def _load_state(path: str) -> Dict[str, float]:
             return default
         logical = _wrap_360(_safe_float(data.get("logical_azimuth_deg"), 0.0))
         command = _clamp_angle(_safe_float(data.get("command_angle_deg"), DEFAULT_COMMAND_ANGLE))
-        return {"logical_azimuth_deg": logical, "command_angle_deg": command}
+        pulse_min = data.get("pulse_min_width_s")
+        pulse_max = data.get("pulse_max_width_s")
+        pulse_min_f = _safe_float(pulse_min, -1.0) if pulse_min is not None else -1.0
+        pulse_max_f = _safe_float(pulse_max, -1.0) if pulse_max is not None else -1.0
+        if pulse_min_f <= 0 or pulse_max_f <= 0 or pulse_min_f >= pulse_max_f:
+            pulse_min_f = None
+            pulse_max_f = None
+        return {
+            "logical_azimuth_deg": logical,
+            "command_angle_deg": command,
+            "pulse_min_width_s": pulse_min_f,
+            "pulse_max_width_s": pulse_max_f,
+        }
     except Exception:
         return default
 
 
-def _save_state(path: str, logical_azimuth_deg: float, command_angle_deg: float):
+def _save_state(
+    path: str,
+    logical_azimuth_deg: float,
+    command_angle_deg: float,
+    pulse_min_width_s: float | None,
+    pulse_max_width_s: float | None,
+):
     state_dir = os.path.dirname(path)
     if state_dir:
         os.makedirs(state_dir, exist_ok=True)
+    payload = {
+        "logical_azimuth_deg": _wrap_360(logical_azimuth_deg),
+        "command_angle_deg": _clamp_angle(command_angle_deg),
+    }
+    if (
+        pulse_min_width_s is not None
+        and pulse_max_width_s is not None
+        and pulse_min_width_s > 0
+        and pulse_max_width_s > pulse_min_width_s
+    ):
+        payload["pulse_min_width_s"] = float(pulse_min_width_s)
+        payload["pulse_max_width_s"] = float(pulse_max_width_s)
     with open(path, "w") as f:
-        json.dump(
-            {
-                "logical_azimuth_deg": _wrap_360(logical_azimuth_deg),
-                "command_angle_deg": _clamp_angle(command_angle_deg),
-            },
-            f,
-        )
+        json.dump(payload, f)
 
 
 def _angle_to_servo_value(angle_deg: float) -> float:
@@ -138,6 +169,20 @@ def _resolve_pulse_widths(servo_cfg: Dict[str, Any]) -> tuple[float, float]:
     return min_pulse, max_pulse
 
 
+def _resolve_active_pulse_widths(
+    servo_cfg: Dict[str, Any],
+    state: Dict[str, Any],
+) -> tuple[float, float, str]:
+    cfg_min, cfg_max = _resolve_pulse_widths(servo_cfg)
+    state_min = state.get("pulse_min_width_s")
+    state_max = state.get("pulse_max_width_s")
+    state_min_f = _safe_float(state_min, -1.0) if state_min is not None else -1.0
+    state_max_f = _safe_float(state_max, -1.0) if state_max is not None else -1.0
+    if state_min_f > 0 and state_max_f > state_min_f:
+        return state_min_f, state_max_f, "state override"
+    return cfg_min, cfg_max, "config"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Simple servo step calibrator (servotest-style positional control)."
@@ -148,18 +193,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p_step = sub.add_parser("step", help="Move by N degrees in chosen direction.")
     p_step.add_argument("direction", choices=["cw", "ccw"], help="Move direction.")
     p_step.add_argument("degrees", type=float, help="Step size in degrees (>0).")
+    p_pulse = sub.add_parser("pulse", help="Set or reset pulse-width override.")
+    p_pulse.add_argument("value1", help="min_us or 'reset'")
+    p_pulse.add_argument("value2", nargs="?", help="max_us (required unless reset)")
     return parser
 
 
 def main() -> int:
     args = _build_parser().parse_args()
     state = _load_state(STATE_FILE)
+    cfg = _load_yaml(CONFIG_PATH)
+    servo_cfg = _safe_dict(cfg.get("servo"))
 
     if args.command == "status":
-        cfg = _load_yaml(CONFIG_PATH)
-        servo_cfg = _safe_dict(cfg.get("servo"))
         calib_cfg = _safe_dict(servo_cfg.get("calibration"))
-        min_pulse, max_pulse = _resolve_pulse_widths(servo_cfg)
+        min_pulse, max_pulse, pulse_source = _resolve_active_pulse_widths(servo_cfg, state)
         physical_deg_per_command_deg = _safe_float(
             calib_cfg.get("physical_deg_per_command_deg", DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG),
             DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG,
@@ -169,14 +217,63 @@ def main() -> int:
         print(f"Logical azimuth: {state['logical_azimuth_deg']:.1f}°")
         print(f"Command angle: {state['command_angle_deg']:.1f}°")
         print(f"physical_deg_per_command_deg: {physical_deg_per_command_deg:.4f}")
-        print(f"Pulse range: {min_pulse * 1e6:.0f}us -> {max_pulse * 1e6:.0f}us")
+        print(f"Pulse range ({pulse_source}): {min_pulse * 1e6:.0f}us -> {max_pulse * 1e6:.0f}us")
         print(f"State file: {STATE_FILE}")
         return 0
 
     if args.command == "zero":
-        _save_state(STATE_FILE, 0.0, state["command_angle_deg"])
+        _save_state(
+            STATE_FILE,
+            0.0,
+            state["command_angle_deg"],
+            state.get("pulse_min_width_s"),
+            state.get("pulse_max_width_s"),
+        )
         print("Zero set.")
         print("Current physical position is now logical 0.0°.")
+        print(f"State file: {STATE_FILE}")
+        return 0
+
+    if args.command == "pulse":
+        raw = str(getattr(args, "value1", "")).strip().lower()
+        if raw == "reset":
+            _save_state(
+                STATE_FILE,
+                state["logical_azimuth_deg"],
+                state["command_angle_deg"],
+                None,
+                None,
+            )
+            cfg_min, cfg_max = _resolve_pulse_widths(servo_cfg)
+            print("Pulse override cleared.")
+            print(f"Active pulse range (config): {cfg_min * 1e6:.0f}us -> {cfg_max * 1e6:.0f}us")
+            print(f"State file: {STATE_FILE}")
+            return 0
+
+        if getattr(args, "value2", None) is None:
+            print("ERROR: pulse requires two values: pulse <min_us> <max_us>")
+            return 2
+
+        min_us = _safe_float(getattr(args, "value1"), -1.0)
+        max_us = _safe_float(getattr(args, "value2"), -1.0)
+        if min_us <= 0 or max_us <= 0 or min_us >= max_us:
+            print("ERROR: pulse values must be > 0 and min_us < max_us")
+            return 2
+        if min_us < 300 or max_us > 3000:
+            print("ERROR: pulse values out of safe range (300..3000 us)")
+            return 2
+
+        min_s = min_us / 1_000_000.0
+        max_s = max_us / 1_000_000.0
+        _save_state(
+            STATE_FILE,
+            state["logical_azimuth_deg"],
+            state["command_angle_deg"],
+            min_s,
+            max_s,
+        )
+        print("Pulse override set.")
+        print(f"Active pulse range (state override): {min_us:.0f}us -> {max_us:.0f}us")
         print(f"State file: {STATE_FILE}")
         return 0
 
@@ -189,10 +286,8 @@ def main() -> int:
         print("ERROR: step degrees must be > 0")
         return 2
 
-    cfg = _load_yaml(CONFIG_PATH)
-    servo_cfg = _safe_dict(cfg.get("servo"))
     pin = _safe_int(servo_cfg.get("pin", 18), 18)
-    min_pulse, max_pulse = _resolve_pulse_widths(servo_cfg)
+    min_pulse, max_pulse, pulse_source = _resolve_active_pulse_widths(servo_cfg, state)
 
     calib_cfg = _safe_dict(servo_cfg.get("calibration"))
     cw_increases_angle = _safe_bool(calib_cfg.get("cw_increases_angle", True), True)
@@ -249,7 +344,13 @@ def main() -> int:
             if sweep_delay > 0:
                 time.sleep(sweep_delay)
 
-        _save_state(STATE_FILE, next_logical, target_cmd_angle)
+        _save_state(
+            STATE_FILE,
+            next_logical,
+            target_cmd_angle,
+            state.get("pulse_min_width_s"),
+            state.get("pulse_max_width_s"),
+        )
 
         print("Step executed.")
         print(f"  direction: {direction}")
@@ -258,7 +359,7 @@ def main() -> int:
         print(f"  command angle: {current_cmd_angle:.1f}° -> {target_cmd_angle:.1f}°")
         print(f"  command delta applied: {actual_cmd_delta:+.1f}°")
         print(f"  physical_deg_per_command_deg: {physical_deg_per_command_deg:.4f}")
-        print(f"  pulse range: {min_pulse * 1e6:.0f}us -> {max_pulse * 1e6:.0f}us")
+        print(f"  pulse range ({pulse_source}): {min_pulse * 1e6:.0f}us -> {max_pulse * 1e6:.0f}us")
         print(f"  cw_increases_angle: {cw_increases_angle}")
         return 0
 
