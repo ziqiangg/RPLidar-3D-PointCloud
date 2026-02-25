@@ -95,8 +95,20 @@ def _load_calibration() -> Dict[str, float]:
     continuous_cfg = _safe_dict(servo_cfg.get("continuous"))
 
     pin = _safe_int(servo_cfg.get("pin", 18), 18)
-    min_pulse = _safe_float(servo_cfg.get("min_pulse_width", 0.001), 0.001)
-    max_pulse = _safe_float(servo_cfg.get("max_pulse_width", 0.002), 0.002)
+    min_pulse = _safe_float(
+        continuous_cfg.get(
+            "min_pulse_width",
+            servo_cfg.get("min_pulse_width", 0.001),
+        ),
+        0.001,
+    )
+    max_pulse = _safe_float(
+        continuous_cfg.get(
+            "max_pulse_width",
+            servo_cfg.get("max_pulse_width", 0.002),
+        ),
+        0.002,
+    )
 
     neutral = _safe_float(
         continuous_cfg.get("neutral_value", DEFAULT_NEUTRAL_VALUE),

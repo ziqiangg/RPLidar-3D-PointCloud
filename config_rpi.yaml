@@ -28,6 +28,17 @@ servo:
   settle_time: 0.08
   release_after_move: false
   reset_settle_time: 0.02
+  # Optional continuous-rotation calibration (used by set_servo_azimuth.py --continuous)
+  continuous:
+    # Continuous-servo range can be wider than positional 1ms..2ms.
+    # These are used by set_servo_azimuth.py only.
+    min_pulse_width: 0.0005
+    max_pulse_width: 0.0025
+    neutral_value: 0.0
+    cw_value: 0.9
+    ccw_value: -0.9
+    deg_per_sec_cw: 120.0
+    deg_per_sec_ccw: 120.0
 
 scan3d:
   azimuth_start: 0
@@ -37,6 +48,8 @@ scan3d:
   inter_slice_sleep: 1.0
   # Debug mode: require explicit MQTT step command before each next slice.
   step_permission_required: true
+  # Anti-jitter: disable PWM holding while waiting for step permission.
+  release_while_waiting: true
   min_angle_resolution: 2.0
   min_coverage: 0.80
   relaxed_max_gap: 10.0
