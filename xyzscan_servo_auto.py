@@ -16,7 +16,7 @@ import math
 import os
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from rplidar import RPLidar
 
@@ -49,6 +49,7 @@ SERVO_MIN_PULSE_WIDTH = 1 / 1000
 SERVO_MAX_PULSE_WIDTH = 2 / 1000
 SERVO_SETTLE_TIME = 0.08
 SERVO_RESET_SETTLE_TIME = 0.02
+SERVO_RELEASE_AFTER_MOVE = True
 
 # Azimuth sweep defaults
 AZIMUTH_START = 0
@@ -85,6 +86,10 @@ class ServoFS90:
         value = (clamped - 90) / 90.0  # 0° -> -1, 90° -> 0, 180° -> 1
         self.servo.value = value
 
+    def release(self):
+        """Disable PWM signal to reduce holding jitter."""
+        self.servo.value = None
+
     def cleanup(self):
         """Release servo resources."""
         self.servo.close()
@@ -102,6 +107,29 @@ def _safe_float(value, default: float) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _safe_bool(value, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
+def _is_stop_requested(should_stop: Optional[Callable[[], bool]]) -> bool:
+    if not should_stop:
+        return False
+    try:
+        return bool(should_stop())
+    except Exception:
+        return False
 
 
 def merge_scans(scans: List[List[Tuple[int, float, float]]], min_angle_resolution: float) -> List[Tuple[int, float, float]]:
@@ -163,6 +191,7 @@ def perform_scan_at_angle(
     plateau_patience: int,
     slice_timeout: float,
     buffer_size: int,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> Dict:
     """
     Capture one vertical slice, merging multiple revolutions if needed.
@@ -174,6 +203,19 @@ def perform_scan_at_angle(
     plateau_count = 0
 
     for scan in lidar.iter_scans(max_buf_meas=buffer_size, min_len=50):
+        if _is_stop_requested(should_stop):
+            return {
+                "success": False,
+                "stopped": True,
+                "scan": [],
+                "coverage": 0.0,
+                "max_gap": 360.0,
+                "point_count": 0,
+                "scans_merged": len(collected_scans),
+                "quality_message": "Scan stopped by user",
+                "error": None,
+            }
+
         elapsed = time.time() - start_time
 
         if not scan or len(scan) < 50:
@@ -207,6 +249,7 @@ def perform_scan_at_angle(
     if not merged_slice:
         return {
             "success": False,
+            "stopped": False,
             "scan": [],
             "coverage": 0.0,
             "max_gap": 360.0,
@@ -222,6 +265,7 @@ def perform_scan_at_angle(
 
     return {
         "success": True,
+        "stopped": False,
         "scan": merged_slice,
         "coverage": coverage,
         "max_gap": max_gap,
@@ -299,6 +343,7 @@ def run_scan(
     output_dir: str = "data",
     servo_config: Optional[Dict] = None,
     scan_config: Optional[Dict] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> Dict:
     """
     Execute automated 3D scan and return structured result.
@@ -334,6 +379,10 @@ def run_scan(
             SERVO_RESET_SETTLE_TIME,
         ),
     )
+    release_after_move = _safe_bool(
+        servo_config.get("release_after_move", SERVO_RELEASE_AFTER_MOVE),
+        SERVO_RELEASE_AFTER_MOVE,
+    )
 
     azimuth_start = _safe_int(scan_config.get("azimuth_start", AZIMUTH_START), AZIMUTH_START)
     azimuth_end = _safe_int(scan_config.get("azimuth_end", AZIMUTH_END), AZIMUTH_END)
@@ -364,6 +413,7 @@ def run_scan(
 
     result = {
         "success": False,
+        "stopped": False,
         "point_count": 0,
         "files": [],
         "error": "Scan did not start",
@@ -388,6 +438,17 @@ def run_scan(
     scans_merged_per_slice: List[int] = []
 
     try:
+        if _is_stop_requested(should_stop):
+            return {
+                "success": False,
+                "stopped": True,
+                "point_count": 0,
+                "files": [],
+                "error": None,
+                "message": "Scan stopped before start",
+                "scan_quality": {},
+            }
+
         servo = ServoFS90(
             pin=servo_pin,
             min_pulse_width=min_pulse_width,
@@ -410,11 +471,30 @@ def run_scan(
         servo.set_angle(sweep_angles[0])
         current_angle = sweep_angles[0]
         time.sleep(servo_settle_time)
+        if release_after_move:
+            servo.release()
 
         for angle in sweep_angles:
+            if _is_stop_requested(should_stop):
+                return {
+                    "success": False,
+                    "stopped": True,
+                    "point_count": len(all_points_3d),
+                    "files": [],
+                    "error": None,
+                    "message": "Scan stopped by user",
+                    "scan_quality": {
+                        "successful_slices": successful_slices,
+                        "failed_slices": failed_slices,
+                        "total_slices": len(sweep_angles),
+                    },
+                }
+
             servo.set_angle(angle)
             current_angle = angle
             time.sleep(servo_settle_time)
+            if release_after_move:
+                servo.release()
 
             slice_result = perform_scan_at_angle(
                 lidar=lidar,
@@ -425,7 +505,23 @@ def run_scan(
                 plateau_patience=plateau_patience,
                 slice_timeout=slice_timeout,
                 buffer_size=buffer_size,
+                should_stop=should_stop,
             )
+
+            if slice_result.get("stopped"):
+                return {
+                    "success": False,
+                    "stopped": True,
+                    "point_count": len(all_points_3d),
+                    "files": [],
+                    "error": None,
+                    "message": "Scan stopped by user",
+                    "scan_quality": {
+                        "successful_slices": successful_slices,
+                        "failed_slices": failed_slices,
+                        "total_slices": len(sweep_angles),
+                    },
+                }
 
             if not slice_result["success"]:
                 failed_slices += 1
@@ -488,6 +584,7 @@ def run_scan(
 
         result = {
             "success": True,
+            "stopped": False,
             "point_count": len(all_points_3d),
             "files": [csv_file, ply_file],
             "error": None,
@@ -511,6 +608,7 @@ def run_scan(
     except Exception as e:
         result = {
             "success": False,
+            "stopped": False,
             "point_count": 0,
             "files": [],
             "error": str(e),
@@ -537,6 +635,10 @@ def run_scan(
             except Exception as e:
                 reset_error = str(e)
             finally:
+                try:
+                    servo.release()
+                except Exception:
+                    pass
                 try:
                     servo.cleanup()
                 except Exception:

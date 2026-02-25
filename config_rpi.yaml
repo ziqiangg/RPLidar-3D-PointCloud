@@ -22,6 +22,7 @@ servo:
   min_pulse_width: 0.001
   max_pulse_width: 0.002
   settle_time: 0.08
+  release_after_move: true
   reset_settle_time: 0.02
 
 scan3d:

@@ -11,11 +11,10 @@ This service runs on the Raspberry Pi and:
 import os
 import sys
 import time
-import uuid
+import threading
 import yaml
 import logging
 import traceback
-from pathlib import Path
 from typing import Optional
 
 # Add parent directory to path for imports
@@ -58,6 +57,9 @@ class RPiScannerService(MQTTClientBase):
         # Scanner state
         self.current_scan_id: Optional[str] = None
         self.scan_running = False
+        self.scan_thread: Optional[threading.Thread] = None
+        self.stop_requested = threading.Event()
+        self.state_lock = threading.Lock()
         
         self.logger.info("RPi Scanner Service initialized")
     
@@ -104,18 +106,29 @@ class RPiScannerService(MQTTClientBase):
             self.logger.info(f"Received scan command: {command.scan_id}, type: {command.scan_type}")
             
             # Check if already scanning
-            if self.scan_running:
-                self.logger.warning(f"Scan already in progress: {self.current_scan_id}")
-                status = ScanStatus.create_error(
-                    command.scan_id,
-                    "Scanner busy - another scan is in progress",
-                    f"Current scan: {self.current_scan_id}"
+            with self.state_lock:
+                if self.scan_running:
+                    current_scan = self.current_scan_id
+                    self.logger.warning(f"Scan already in progress: {current_scan}")
+                    status = ScanStatus.create_error(
+                        command.scan_id,
+                        "Scanner busy - another scan is in progress",
+                        f"Current scan: {current_scan}"
+                    )
+                    self.publish(Topics.status_topic(command.scan_id), status.to_json())
+                    return
+
+                # Mark running and start worker thread so MQTT callbacks remain responsive.
+                self.current_scan_id = command.scan_id
+                self.scan_running = True
+                self.stop_requested.clear()
+                self.scan_thread = threading.Thread(
+                    target=self._execute_scan,
+                    args=(command,),
+                    daemon=True
                 )
-                self.publish(Topics.status_topic(command.scan_id), status.to_json())
-                return
-            
-            # Execute scan
-            self._execute_scan(command)
+                self.scan_thread.start()
+                self.logger.info(f"Scan worker started for {command.scan_id}")
             
         except Exception as e:
             self.logger.error(f"Error handling scan command: {e}")
@@ -126,13 +139,13 @@ class RPiScannerService(MQTTClientBase):
         try:
             command = StopCommand.from_json(payload.decode('utf-8'))
             self.logger.info(f"Received stop command for scan: {command.scan_id}")
-            
-            if self.current_scan_id == command.scan_id and self.scan_running:
-                self.logger.info("Stopping current scan")
-                # Note: dump_one_scan.py doesn't support interruption
-                # This is a limitation - would need to modify the script
-                # For now, just log the request
-                self.logger.warning("Stop command received but scan cannot be interrupted")
+
+            with self.state_lock:
+                active_scan = self.scan_running and self.current_scan_id == command.scan_id
+
+            if active_scan:
+                self.stop_requested.set()
+                self.logger.info("Stop requested for active scan")
             else:
                 self.logger.info("No matching scan to stop")
                 
@@ -141,9 +154,6 @@ class RPiScannerService(MQTTClientBase):
     
     def _execute_scan(self, command: ScanCommand):
         """Execute a scan based on command."""
-        self.current_scan_id = command.scan_id
-        self.scan_running = True
-        
         try:
             self.logger.info(f"Starting scan {command.scan_id}")
             
@@ -163,6 +173,15 @@ class RPiScannerService(MQTTClientBase):
                 self.publish(Topics.status_topic(command.scan_id), status.to_json())
                 return
             
+            if scan_result.get('stopped'):
+                self.logger.info(f"Scan stopped: {scan_result.get('message', 'Scan stopped by user')}")
+                status = ScanStatus.create_stopped(
+                    command.scan_id,
+                    scan_result.get('message', 'Scan stopped by user')
+                )
+                self.publish(Topics.status_topic(command.scan_id), status.to_json())
+                return
+
             if scan_result['success']:
                 self.logger.info(f"Scan completed successfully: {scan_result['point_count']} points")
                 
@@ -201,8 +220,11 @@ class RPiScannerService(MQTTClientBase):
             self.publish(Topics.status_topic(command.scan_id), status.to_json())
         
         finally:
-            self.scan_running = False
-            self.current_scan_id = None
+            with self.state_lock:
+                self.scan_running = False
+                self.current_scan_id = None
+                self.scan_thread = None
+            self.stop_requested.clear()
     
     def _run_scan_2d(self, port: str) -> dict:
         """
@@ -217,6 +239,17 @@ class RPiScannerService(MQTTClientBase):
             dict with keys: success, point_count, files, error, message, scan_quality
         """
         try:
+            if self.stop_requested.is_set():
+                return {
+                    'success': False,
+                    'stopped': True,
+                    'point_count': 0,
+                    'files': [],
+                    'error': None,
+                    'message': 'Scan stopped by user before 2D scan start',
+                    'scan_quality': {}
+                }
+
             # Import the scan module
             from dump_one_scan import run_scan
             
@@ -232,6 +265,19 @@ class RPiScannerService(MQTTClientBase):
             
             # Execute scan directly (no subprocess)
             result = run_scan(port=port, output_dir=data_dir)
+
+            # dump_one_scan.py is not interruptible mid-run. If stop was requested during
+            # execution, report stopped instead of completed.
+            if self.stop_requested.is_set():
+                return {
+                    'success': False,
+                    'stopped': True,
+                    'point_count': result.get('point_count', 0),
+                    'files': [],
+                    'error': None,
+                    'message': 'Stop requested during 2D scan (non-interruptible)',
+                    'scan_quality': result.get('scan_quality', {})
+                }
             
             if result['success']:
                 self.logger.info(f"Scan completed: {result['message']}")
@@ -252,6 +298,7 @@ class RPiScannerService(MQTTClientBase):
             self.logger.error(traceback.format_exc())
             return {
                 'success': False,
+                'stopped': False,
                 'point_count': 0,
                 'files': [],
                 'error': str(e),
@@ -290,10 +337,13 @@ class RPiScannerService(MQTTClientBase):
                 port=port,
                 output_dir=data_dir,
                 servo_config=servo_cfg,
-                scan_config=scan3d_cfg
+                scan_config=scan3d_cfg,
+                should_stop=self.stop_requested.is_set
             )
 
-            if result['success']:
+            if result.get('stopped'):
+                self.logger.info(f"3D scan stopped: {result.get('message', 'Scan stopped by user')}")
+            elif result['success']:
                 self.logger.info(f"3D scan completed: {result['message']}")
                 quality = result.get('scan_quality', {})
                 if quality:
@@ -313,6 +363,7 @@ class RPiScannerService(MQTTClientBase):
             self.logger.error(traceback.format_exc())
             return {
                 'success': False,
+                'stopped': False,
                 'point_count': 0,
                 'files': [],
                 'error': str(e),
