@@ -71,7 +71,7 @@ class ScanController:
         Start a scan via MQTT command to Raspberry Pi.
         
         Args:
-            scan_type: "2d" only (3D deprecated)
+            scan_type: "2d" or "3d"
             params: Optional parameters including:
                 - port: Serial port (e.g., "/dev/ttyUSB0") or "auto"
         """
@@ -85,9 +85,12 @@ class ScanController:
         
         params = params or {}
         
-        # Only support 2D scans now
-        if scan_type != config.SCAN_TYPE_2D:
-            self._update_status("error", f"Scan type '{scan_type}' not supported (only 2D scans available)")
+        if scan_type not in config.SUPPORTED_SCAN_TYPES:
+            self._update_status(
+                "error",
+                f"Scan type '{scan_type}' not supported "
+                f"(supported: {', '.join(config.SUPPORTED_SCAN_TYPES)})"
+            )
             return False
         
         # Get port parameter
@@ -169,6 +172,7 @@ class ScanController:
             
             if status.status == "completed":
                 # Success
+                # Service writes scan.ply for both 2D and 3D scan modes.
                 output_file = config.SCAN_2D_PLY
                 if self.completion_callback:
                     self.completion_callback(self.current_scan_type, True, output_file)
@@ -236,4 +240,3 @@ if __name__ == "__main__":
         controller.stop_scan()
     
     print("Done!")
-

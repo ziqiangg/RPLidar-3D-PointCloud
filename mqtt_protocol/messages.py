@@ -30,7 +30,7 @@ class ScanCommand:
     Topic: rplidar/commands/scan
     """
     scan_id: str
-    scan_type: str  # "2d" only for now
+    scan_type: str  # "2d" or "3d"
     port: str = "auto"  # Serial port or "auto" for auto-detection
     
     def to_json(self) -> str:

@@ -15,3 +15,7 @@ pyyaml
 
 # Numerical operations
 numpy
+
+# Servo control (Raspberry Pi)
+gpiozero
+lgpio

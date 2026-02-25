@@ -108,21 +108,22 @@ class RPLidarViewerApp:
         tab.add_child(title)
         tab.add_fixed(em)
         
-        # Script selection
-        script_panel = gui.CollapsableVert("Scan Script", 0.25 * em, gui.Margins(em, 0, 0, 0))
-        
-        # Script selection - use VBox with labels instead of RadioButton with children
-        script_container = gui.Vert(0.5 * em)
-        
-        script_2d_checkbox = gui.Checkbox("dump_one_scan.py - Single 2D 360° scan")
-        script_2d_checkbox.checked = True
-        script_2d_checkbox.enabled = False  # Only one option, keep it checked
-        script_container.add_child(script_2d_checkbox)
-        
-        self.script_2d_checkbox = script_2d_checkbox
-        
-        script_panel.add_child(script_container)
-        tab.add_child(script_panel)
+        # Scan type selection
+        scan_type_panel = gui.CollapsableVert("Scan Type", 0.25 * em, gui.Margins(em, 0, 0, 0))
+        scan_type_container = gui.Vert(0.5 * em)
+
+        self.scan_type_2d_checkbox = gui.Checkbox("2D Scan (single 360°)")
+        self.scan_type_2d_checkbox.checked = True
+        self.scan_type_2d_checkbox.set_on_checked(self._on_scan_type_2d_checked)
+        scan_type_container.add_child(self.scan_type_2d_checkbox)
+
+        self.scan_type_3d_checkbox = gui.Checkbox("3D Scan (servo 0° -> 180°)")
+        self.scan_type_3d_checkbox.checked = False
+        self.scan_type_3d_checkbox.set_on_checked(self._on_scan_type_3d_checked)
+        scan_type_container.add_child(self.scan_type_3d_checkbox)
+
+        scan_type_panel.add_child(scan_type_container)
+        tab.add_child(scan_type_panel)
         
         tab.add_fixed(em)
         
@@ -276,8 +277,8 @@ class RPLidarViewerApp:
             print("[DEBUG] Scan already running, ignoring")
             return
         
-        # Always 2D scan (only option)
-        scan_type = "2d"
+        # Determine selected scan type
+        scan_type = config.SCAN_TYPE_3D if self.scan_type_3d_checkbox.checked else config.SCAN_TYPE_2D
         print(f"[DEBUG] Selected scan type: {scan_type}")
         
         # Get port if specified
@@ -293,8 +294,27 @@ class RPLidarViewerApp:
         
         # Start scan
         print(f"[DEBUG] Starting scan with type={scan_type}, params={params}")
-        self.scan_controller.start_scan(scan_type, params)
-        print("[DEBUG] Scan started")
+        started = self.scan_controller.start_scan(scan_type, params)
+        if started:
+            print("[DEBUG] Scan started")
+        else:
+            print("[DEBUG] Scan failed to start, restoring button state")
+            self.start_scan_btn.enabled = True
+            self.stop_scan_btn.enabled = False
+
+    def _on_scan_type_2d_checked(self, checked: bool):
+        """Keep scan type selection mutually exclusive."""
+        if checked:
+            self.scan_type_3d_checkbox.checked = False
+        elif not self.scan_type_3d_checkbox.checked:
+            self.scan_type_2d_checkbox.checked = True
+
+    def _on_scan_type_3d_checked(self, checked: bool):
+        """Keep scan type selection mutually exclusive."""
+        if checked:
+            self.scan_type_2d_checkbox.checked = False
+        elif not self.scan_type_2d_checkbox.checked:
+            self.scan_type_3d_checkbox.checked = True
     
     def _on_stop_scan(self):
         """Handle stop scan button click."""

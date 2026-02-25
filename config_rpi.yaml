@@ -16,6 +16,25 @@ device:
 data:
   output_dir: "./data"
   formats: ["csv", "ply"]  # Generate both formats
+
+servo:
+  pin: 18
+  min_pulse_width: 0.001
+  max_pulse_width: 0.002
+  settle_time: 0.08
+  reset_settle_time: 0.02
+
+scan3d:
+  azimuth_start: 0
+  azimuth_end: 180
+  azimuth_step: 1
+  min_angle_resolution: 2.0
+  min_coverage: 0.80
+  relaxed_max_gap: 10.0
+  max_scans_to_merge: 20
+  plateau_patience: 5
+  slice_timeout: 5.0
+  buffer_size: 5000
   
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR

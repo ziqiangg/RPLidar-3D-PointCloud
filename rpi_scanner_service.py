@@ -147,9 +147,21 @@ class RPiScannerService(MQTTClientBase):
         try:
             self.logger.info(f"Starting scan {command.scan_id}")
             
-            # Import and run the scan directly (not subprocess)
-            # This allows us to capture the results programmatically
-            scan_result = self._run_scan_2d(command.port)
+            # Import and run scan directly (not subprocess)
+            # This allows us to capture results programmatically.
+            if command.scan_type == "2d":
+                scan_result = self._run_scan_2d(command.port)
+            elif command.scan_type == "3d":
+                scan_result = self._run_scan_3d(command.port)
+            else:
+                self.logger.error(f"Unsupported scan type: {command.scan_type}")
+                status = ScanStatus.create_error(
+                    command.scan_id,
+                    f"Unsupported scan type: {command.scan_type}",
+                    "Supported scan types are: 2d, 3d"
+                )
+                self.publish(Topics.status_topic(command.scan_id), status.to_json())
+                return
             
             if scan_result['success']:
                 self.logger.info(f"Scan completed successfully: {scan_result['point_count']} points")
@@ -244,6 +256,67 @@ class RPiScannerService(MQTTClientBase):
                 'files': [],
                 'error': str(e),
                 'message': f"Scan execution error: {str(e)}",
+                'scan_quality': {}
+            }
+
+    def _run_scan_3d(self, port: str) -> dict:
+        """
+        Run automated 3D scan by importing xyzscan_servo_auto.run_scan().
+
+        Args:
+            port: Serial port ("auto" or specific port like "/dev/ttyUSB0")
+
+        Returns:
+            dict with keys: success, point_count, files, error, message, scan_quality
+        """
+        try:
+            # Import the 3D scan module
+            from xyzscan_servo_auto import run_scan
+
+            # Determine LiDAR port
+            if port == "auto":
+                from utils.port_config import get_default_port
+                port = get_default_port()
+
+            self.logger.info(f"Starting automated 3D scan on port: {port}")
+
+            # Get output directory and optional 3D configs from service config
+            data_dir = self.config['data']['output_dir']
+            servo_cfg = self.config.get('servo', {})
+            scan3d_cfg = self.config.get('scan3d', {})
+
+            # Execute scan directly (no subprocess)
+            result = run_scan(
+                port=port,
+                output_dir=data_dir,
+                servo_config=servo_cfg,
+                scan_config=scan3d_cfg
+            )
+
+            if result['success']:
+                self.logger.info(f"3D scan completed: {result['message']}")
+                quality = result.get('scan_quality', {})
+                if quality:
+                    self.logger.info(
+                        f"3D slices: {quality.get('successful_slices', 0)}/"
+                        f"{quality.get('total_slices', 0)}, "
+                        f"avg coverage {quality.get('avg_slice_coverage_percent', 0):.1f}%, "
+                        f"reset_completed={quality.get('reset_completed', False)}"
+                    )
+            else:
+                self.logger.error(f"3D scan failed: {result['error']}")
+
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Error running 3D scan: {e}")
+            self.logger.error(traceback.format_exc())
+            return {
+                'success': False,
+                'point_count': 0,
+                'files': [],
+                'error': str(e),
+                'message': f"3D scan execution error: {str(e)}",
                 'scan_quality': {}
             }
     
