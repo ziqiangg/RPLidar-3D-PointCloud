@@ -12,6 +12,8 @@ import os
 import sys
 import time
 import threading
+import multiprocessing as mp
+import queue
 import yaml
 import logging
 import traceback
@@ -29,6 +31,49 @@ from mqtt_protocol import (
     DataMessage,
     MessageDecoder
 )
+
+
+def _run_scan_3d_worker(
+    port: str,
+    output_dir: str,
+    servo_cfg: dict,
+    scan3d_cfg: dict,
+    stop_event,
+    message_queue,
+):
+    """Child process entrypoint for 3D scan execution."""
+    try:
+        from xyzscan_servo_auto import run_scan
+
+        def progress_cb(progress: dict):
+            try:
+                message_queue.put({"type": "progress", "data": progress}, timeout=0.5)
+            except Exception:
+                pass
+
+        result = run_scan(
+            port=port,
+            output_dir=output_dir,
+            servo_config=servo_cfg,
+            scan_config=scan3d_cfg,
+            should_stop=stop_event.is_set,
+            progress_callback=progress_cb,
+        )
+    except Exception as e:
+        result = {
+            "success": False,
+            "stopped": False,
+            "point_count": 0,
+            "files": [],
+            "error": str(e),
+            "message": f"3D scan worker failed: {str(e)}",
+            "scan_quality": {},
+        }
+
+    try:
+        message_queue.put({"type": "result", "data": result}, timeout=0.5)
+    except Exception:
+        pass
 
 
 class RPiScannerService(MQTTClientBase):
@@ -60,8 +105,8 @@ class RPiScannerService(MQTTClientBase):
         self.scan_thread: Optional[threading.Thread] = None
         self.stop_requested = threading.Event()
         self.state_lock = threading.Lock()
-        self.active_lidar = None
-        self.active_servo = None
+        self.active_process: Optional[mp.Process] = None
+        self.active_process_stop_event = None
         
         self.logger.info("RPi Scanner Service initialized")
     
@@ -157,18 +202,20 @@ class RPiScannerService(MQTTClientBase):
 
             with self.state_lock:
                 active_scan = self.scan_running and self.current_scan_id == command.scan_id
-                active_lidar = self.active_lidar
+                active_process = self.active_process
+                active_process_stop_event = self.active_process_stop_event
 
             if active_scan:
                 self.stop_requested.set()
                 self.logger.info("Stop requested for active scan")
-                # Force-unblock long-running LiDAR reads so stop can complete quickly.
-                if active_lidar is not None:
+                if active_process_stop_event is not None:
                     try:
-                        active_lidar.stop()
-                        self.logger.info("Issued hardware stop to active LiDAR")
+                        active_process_stop_event.set()
+                        self.logger.info("Signaled 3D worker process to stop")
                     except Exception as e:
-                        self.logger.warning(f"Failed to stop active LiDAR immediately: {e}")
+                        self.logger.warning(f"Failed to signal 3D worker stop: {e}")
+                if active_process is not None and not active_process.is_alive():
+                    self.logger.info("Active process already exited")
             else:
                 self.logger.info("No matching scan to stop")
                 
@@ -251,8 +298,8 @@ class RPiScannerService(MQTTClientBase):
                 self.scan_running = False
                 self.current_scan_id = None
                 self.scan_thread = None
-                self.active_lidar = None
-                self.active_servo = None
+                self.active_process = None
+                self.active_process_stop_event = None
             self.stop_requested.clear()
     
     def _run_scan_2d(self, port: str) -> dict:
@@ -352,9 +399,6 @@ class RPiScannerService(MQTTClientBase):
             dict with keys: success, point_count, files, error, message, scan_quality
         """
         try:
-            # Import the 3D scan module
-            from xyzscan_servo_auto import run_scan
-
             # Determine LiDAR port
             if port == "auto":
                 from utils.port_config import get_default_port
@@ -367,28 +411,123 @@ class RPiScannerService(MQTTClientBase):
             servo_cfg = self.config.get('servo', {})
             scan3d_cfg = self.config.get('scan3d', {})
 
-            def progress_cb(progress: dict):
-                message = progress.get('message', "3D scan in progress")
-                point_count = progress.get('point_count')
-                self._publish_started_status(scan_id, message, point_count=point_count)
-
-            def hardware_cb(kind: str, handle):
-                with self.state_lock:
-                    if kind == "lidar":
-                        self.active_lidar = handle
-                    elif kind == "servo":
-                        self.active_servo = handle
-
-            # Execute scan directly (no subprocess)
-            result = run_scan(
-                port=port,
-                output_dir=data_dir,
-                servo_config=servo_cfg,
-                scan_config=scan3d_cfg,
-                should_stop=self.stop_requested.is_set,
-                progress_callback=progress_cb,
-                hardware_callback=hardware_cb
+            message_queue = mp.Queue()
+            process_stop_event = mp.Event()
+            worker = mp.Process(
+                target=_run_scan_3d_worker,
+                args=(
+                    port,
+                    data_dir,
+                    servo_cfg,
+                    scan3d_cfg,
+                    process_stop_event,
+                    message_queue,
+                ),
+                daemon=True,
             )
+
+            with self.state_lock:
+                self.active_process = worker
+                self.active_process_stop_event = process_stop_event
+
+            worker.start()
+            self.logger.info("3D worker process started")
+
+            stop_grace_deadline = None
+            result = None
+
+            while True:
+                if self.stop_requested.is_set():
+                    if stop_grace_deadline is None:
+                        process_stop_event.set()
+                        stop_grace_deadline = time.time() + 5.0
+                        self.logger.info("Waiting for 3D worker to stop gracefully")
+                    elif worker.is_alive() and time.time() >= stop_grace_deadline:
+                        self.logger.warning("3D worker did not stop in time; terminating")
+                        worker.terminate()
+                        worker.join(timeout=2.0)
+                        if worker.is_alive():
+                            try:
+                                worker.kill()
+                            except Exception:
+                                pass
+                        result = {
+                            'success': False,
+                            'stopped': True,
+                            'point_count': 0,
+                            'files': [],
+                            'error': None,
+                            'message': '3D scan stopped by user',
+                            'scan_quality': {}
+                        }
+                        break
+
+                try:
+                    msg = message_queue.get(timeout=0.2)
+                    msg_type = msg.get("type")
+                    if msg_type == "progress":
+                        progress = msg.get("data", {})
+                        message = progress.get('message', "3D scan in progress")
+                        point_count = progress.get('point_count')
+                        self._publish_started_status(scan_id, message, point_count=point_count)
+                    elif msg_type == "result":
+                        result = msg.get("data")
+                        break
+                except queue.Empty:
+                    pass
+
+                if not worker.is_alive():
+                    if result is None:
+                        # Attempt one final non-blocking drain.
+                        try:
+                            while True:
+                                msg = message_queue.get_nowait()
+                                msg_type = msg.get("type")
+                                if msg_type == "progress":
+                                    progress = msg.get("data", {})
+                                    message = progress.get('message', "3D scan in progress")
+                                    point_count = progress.get('point_count')
+                                    self._publish_started_status(scan_id, message, point_count=point_count)
+                                elif msg_type == "result":
+                                    result = msg.get("data")
+                                    break
+                        except queue.Empty:
+                            pass
+                    if result is None:
+                        if self.stop_requested.is_set():
+                            result = {
+                                'success': False,
+                                'stopped': True,
+                                'point_count': 0,
+                                'files': [],
+                                'error': None,
+                                'message': '3D scan stopped by user',
+                                'scan_quality': {}
+                            }
+                        else:
+                            result = {
+                                'success': False,
+                                'stopped': False,
+                                'point_count': 0,
+                                'files': [],
+                                'error': '3D worker exited without result',
+                                'message': '3D scan worker exited unexpectedly',
+                                'scan_quality': {}
+                            }
+                    break
+
+            worker.join(timeout=1.0)
+
+            if result is None:
+                result = {
+                    'success': False,
+                    'stopped': False,
+                    'point_count': 0,
+                    'files': [],
+                    'error': 'Missing 3D worker result',
+                    'message': '3D scan failed: missing worker result',
+                    'scan_quality': {}
+                }
 
             if result.get('stopped'):
                 self.logger.info(f"3D scan stopped: {result.get('message', 'Scan stopped by user')}")
@@ -403,7 +542,7 @@ class RPiScannerService(MQTTClientBase):
                         f"reset_completed={quality.get('reset_completed', False)}"
                     )
             else:
-                self.logger.error(f"3D scan failed: {result['error']}")
+                self.logger.error(f"3D scan failed: {result.get('error')}")
 
             return result
 
@@ -419,6 +558,10 @@ class RPiScannerService(MQTTClientBase):
                 'message': f"3D scan execution error: {str(e)}",
                 'scan_quality': {}
             }
+        finally:
+            with self.state_lock:
+                self.active_process = None
+                self.active_process_stop_event = None
     
     def _count_csv_points(self, csv_file: str) -> int:
         """Count number of points in CSV file."""

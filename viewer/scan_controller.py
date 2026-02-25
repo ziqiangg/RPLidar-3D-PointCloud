@@ -140,6 +140,11 @@ class ScanController:
             print(f"[SCAN] Requesting stop for scan: {self.current_scan_id}")
             self.mqtt_client.stop_scan(self.current_scan_id)
             self._update_status("stopped", "Stop request sent to Raspberry Pi")
+            # Optimistic local clear so UI is never hard-stuck in running state.
+            # If the scan is still active on RPi, next start request will receive "busy".
+            self.scan_running = False
+            self.current_scan_id = None
+            self.current_scan_type = None
         except Exception as e:
             print(f"[SCAN] Error stopping scan: {e}")
             self._update_status("error", f"Error stopping scan: {e}")
