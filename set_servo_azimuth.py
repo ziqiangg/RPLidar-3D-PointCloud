@@ -4,6 +4,7 @@ Servo calibration helper using positional angle commands (servotest-style).
 
 Commands:
   zero                     Set current logical azimuth to 0°
+  sync <command_angle>     Sync internal command reference to current physical position
   step <cw|ccw> <degrees>  Move by N degrees in direction
   status                   Show logical azimuth + command angle estimate
   pulse <min_us> <max_us>  Override pulse range for calibration
@@ -35,8 +36,8 @@ DEFAULT_COMMAND_ANGLE = 90.0
 DEFAULT_SWEEP_STEP = 1.0
 DEFAULT_SWEEP_DELAY_SEC = 0.01
 DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG = 1.0
-DEFAULT_ZERO_COMMAND_ANGLE_DEG = 0.0
 DEFAULT_FINAL_SETTLE_SEC = 0.15
+DEFAULT_MIN_COMMAND_STEP_DEG = 0.0
 
 
 def _safe_float(value: Any, default: float) -> float:
@@ -191,6 +192,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("zero", help="Set current logical azimuth to 0°.")
+    p_sync = sub.add_parser("sync", help="Set internal command-angle reference (no motor move).")
+    p_sync.add_argument("command_angle", type=float, help="Command angle in degrees (0..180).")
     sub.add_parser("status", help="Show current logical azimuth and command angle.")
     p_step = sub.add_parser("step", help="Move by N degrees in chosen direction.")
     p_step.add_argument("direction", choices=["cw", "ccw"], help="Move direction.")
@@ -216,11 +219,12 @@ def main() -> int:
         )
         if physical_deg_per_command_deg <= 0:
             physical_deg_per_command_deg = DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG
-        zero_command_angle = _clamp_angle(
+        min_command_step_deg = max(
+            0.0,
             _safe_float(
-                calib_cfg.get("zero_command_angle_deg", DEFAULT_ZERO_COMMAND_ANGLE_DEG),
-                DEFAULT_ZERO_COMMAND_ANGLE_DEG,
-            )
+                calib_cfg.get("min_command_step_deg", DEFAULT_MIN_COMMAND_STEP_DEG),
+                DEFAULT_MIN_COMMAND_STEP_DEG,
+            ),
         )
         final_settle_sec = max(
             0.0,
@@ -232,30 +236,37 @@ def main() -> int:
         print(f"Logical azimuth: {state['logical_azimuth_deg']:.1f}°")
         print(f"Command angle: {state['command_angle_deg']:.1f}°")
         print(f"physical_deg_per_command_deg: {physical_deg_per_command_deg:.4f}")
-        print(f"zero_command_angle_deg: {zero_command_angle:.1f}°")
+        print(f"min_command_step_deg: {min_command_step_deg:.3f}°")
         print(f"final_settle_sec: {final_settle_sec:.3f}s")
         print(f"Pulse range ({pulse_source}): {min_pulse * 1e6:.0f}us -> {max_pulse * 1e6:.0f}us")
         print(f"State file: {STATE_FILE}")
         return 0
 
     if args.command == "zero":
-        calib_cfg = _safe_dict(servo_cfg.get("calibration"))
-        zero_command_angle = _clamp_angle(
-            _safe_float(
-                calib_cfg.get("zero_command_angle_deg", DEFAULT_ZERO_COMMAND_ANGLE_DEG),
-                DEFAULT_ZERO_COMMAND_ANGLE_DEG,
-            )
-        )
         _save_state(
             STATE_FILE,
             0.0,
-            zero_command_angle,
+            state["command_angle_deg"],
             state.get("pulse_min_width_s"),
             state.get("pulse_max_width_s"),
         )
         print("Zero set.")
         print("Current physical position is now logical 0.0°.")
-        print(f"Command reference set to {zero_command_angle:.1f}°.")
+        print(f"Command reference kept at {state['command_angle_deg']:.1f}°.")
+        print(f"State file: {STATE_FILE}")
+        return 0
+
+    if args.command == "sync":
+        synced = _clamp_angle(_safe_float(getattr(args, "command_angle", DEFAULT_COMMAND_ANGLE), DEFAULT_COMMAND_ANGLE))
+        _save_state(
+            STATE_FILE,
+            state["logical_azimuth_deg"],
+            synced,
+            state.get("pulse_min_width_s"),
+            state.get("pulse_max_width_s"),
+        )
+        print(f"Command reference synced to {synced:.1f}°.")
+        print("No motor movement was commanded.")
         print(f"State file: {STATE_FILE}")
         return 0
 
@@ -325,6 +336,13 @@ def main() -> int:
     )
     if physical_deg_per_command_deg <= 0:
         physical_deg_per_command_deg = DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG
+    min_command_step_deg = max(
+        0.0,
+        _safe_float(
+            calib_cfg.get("min_command_step_deg", DEFAULT_MIN_COMMAND_STEP_DEG),
+            DEFAULT_MIN_COMMAND_STEP_DEG,
+        ),
+    )
 
     current_cmd_angle = _clamp_angle(state["command_angle_deg"])
     current_logical = _wrap_360(state["logical_azimuth_deg"])
@@ -338,7 +356,10 @@ def main() -> int:
         logical_sign = -1.0
 
     requested_cmd_delta = step_deg / physical_deg_per_command_deg
-    target_cmd_angle = _clamp_angle(current_cmd_angle + cmd_sign * requested_cmd_delta)
+    effective_cmd_delta = requested_cmd_delta
+    if 0 < abs(requested_cmd_delta) < min_command_step_deg:
+        effective_cmd_delta = min_command_step_deg
+    target_cmd_angle = _clamp_angle(current_cmd_angle + cmd_sign * effective_cmd_delta)
     actual_cmd_delta = target_cmd_angle - current_cmd_angle
     if abs(actual_cmd_delta) < 1e-9:
         print("No movement (already at command-angle limit).")
@@ -387,6 +408,7 @@ def main() -> int:
         print(f"  command angle: {current_cmd_angle:.1f}° -> {target_cmd_angle:.1f}°")
         print(f"  command delta applied: {actual_cmd_delta:+.1f}°")
         print(f"  physical_deg_per_command_deg: {physical_deg_per_command_deg:.4f}")
+        print(f"  min_command_step_deg: {min_command_step_deg:.3f}°")
         print(f"  final_settle_sec: {final_settle_sec:.3f}s")
         print(f"  pulse range ({pulse_source}): {min_pulse * 1e6:.0f}us -> {max_pulse * 1e6:.0f}us")
         print(f"  cw_increases_angle: {cw_increases_angle}")

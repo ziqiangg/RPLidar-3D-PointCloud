@@ -31,11 +31,12 @@ servo:
   calibration:
     # If cw command moves wrong way, set this to false.
     cw_increases_angle: false
-    # Command-angle anchor used by `set_servo_azimuth.py zero`.
-    zero_command_angle_deg: 0.0
     # Scale factor to map command-angle movement to real physical movement.
     # Example: if 180 command-deg produces ~60 physical-deg, set to 0.3333.
     physical_deg_per_command_deg: 1.0
+    # Deadband helper: enforce at least this much command-angle change per step.
+    # Set to 0 to disable. Increase if 1° commands do not physically move.
+    min_command_step_deg: 2.0
     # Smooth motion granularity for set_servo_azimuth.py
     sweep_step_deg: 1.0
     sweep_delay_sec: 0.01
