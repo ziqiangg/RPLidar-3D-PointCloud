@@ -259,9 +259,6 @@ def main() -> int:
         if min_us <= 0 or max_us <= 0 or min_us >= max_us:
             print("ERROR: pulse values must be > 0 and min_us < max_us")
             return 2
-        if min_us < 300 or max_us > 3000:
-            print("ERROR: pulse values out of safe range (300..3000 us)")
-            return 2
 
         min_s = min_us / 1_000_000.0
         max_s = max_us / 1_000_000.0

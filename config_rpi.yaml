@@ -42,7 +42,7 @@ servo:
     # Continuous-servo range can be wider than positional 1ms..2ms.
     # set_servo_azimuth.py uses this pulse range first for calibration moves.
     min_pulse_width: 0.0005
-    max_pulse_width: 0.0025
+    max_pulse_width: 0.0035
     neutral_value: 0.0
     cw_value: 0.9
     ccw_value: -0.9
