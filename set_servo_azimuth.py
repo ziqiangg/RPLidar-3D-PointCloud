@@ -3,8 +3,6 @@
 Servo calibration helper using positional angle commands (servotest-style).
 
 Commands:
-  zero                     Set current logical azimuth to 0°
-  sync <command_angle>     Sync internal command reference to current physical position
   step <cw|ccw> <degrees>  Move by N degrees in direction
   status                   Show logical azimuth + command angle estimate
   pulse <min_us> <max_us>  Override pulse range for calibration
@@ -191,9 +189,6 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Simple servo step calibrator (servotest-style positional control)."
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("zero", help="Set current logical azimuth to 0°.")
-    p_sync = sub.add_parser("sync", help="Set internal command-angle reference (no motor move).")
-    p_sync.add_argument("command_angle", type=float, help="Command angle in degrees (0..180).")
     sub.add_parser("status", help="Show current logical azimuth and command angle.")
     p_step = sub.add_parser("step", help="Move by N degrees in chosen direction.")
     p_step.add_argument("direction", choices=["cw", "ccw"], help="Move direction.")
@@ -239,34 +234,6 @@ def main() -> int:
         print(f"min_command_step_deg: {min_command_step_deg:.3f}°")
         print(f"final_settle_sec: {final_settle_sec:.3f}s")
         print(f"Pulse range ({pulse_source}): {min_pulse * 1e6:.0f}us -> {max_pulse * 1e6:.0f}us")
-        print(f"State file: {STATE_FILE}")
-        return 0
-
-    if args.command == "zero":
-        _save_state(
-            STATE_FILE,
-            0.0,
-            state["command_angle_deg"],
-            state.get("pulse_min_width_s"),
-            state.get("pulse_max_width_s"),
-        )
-        print("Zero set.")
-        print("Current physical position is now logical 0.0°.")
-        print(f"Command reference kept at {state['command_angle_deg']:.1f}°.")
-        print(f"State file: {STATE_FILE}")
-        return 0
-
-    if args.command == "sync":
-        synced = _clamp_angle(_safe_float(getattr(args, "command_angle", DEFAULT_COMMAND_ANGLE), DEFAULT_COMMAND_ANGLE))
-        _save_state(
-            STATE_FILE,
-            state["logical_azimuth_deg"],
-            synced,
-            state.get("pulse_min_width_s"),
-            state.get("pulse_max_width_s"),
-        )
-        print(f"Command reference synced to {synced:.1f}°.")
-        print("No motor movement was commanded.")
         print(f"State file: {STATE_FILE}")
         return 0
 
