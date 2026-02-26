@@ -31,12 +31,16 @@ servo:
   calibration:
     # If cw command moves wrong way, set this to false.
     cw_increases_angle: false
+    # Command-angle anchor used by `set_servo_azimuth.py zero`.
+    zero_command_angle_deg: 0.0
     # Scale factor to map command-angle movement to real physical movement.
     # Example: if 180 command-deg produces ~60 physical-deg, set to 0.3333.
     physical_deg_per_command_deg: 1.0
     # Smooth motion granularity for set_servo_azimuth.py
     sweep_step_deg: 1.0
     sweep_delay_sec: 0.01
+    # Keep PWM active briefly after the final command so small steps can settle.
+    final_settle_sec: 0.15
   # Optional continuous-rotation calibration values (reserved for future tuning).
   continuous:
     # Continuous-servo range can be wider than positional 1ms..2ms.

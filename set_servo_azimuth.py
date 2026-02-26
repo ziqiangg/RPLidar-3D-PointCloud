@@ -35,6 +35,8 @@ DEFAULT_COMMAND_ANGLE = 90.0
 DEFAULT_SWEEP_STEP = 1.0
 DEFAULT_SWEEP_DELAY_SEC = 0.01
 DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG = 1.0
+DEFAULT_ZERO_COMMAND_ANGLE_DEG = 0.0
+DEFAULT_FINAL_SETTLE_SEC = 0.15
 
 
 def _safe_float(value: Any, default: float) -> float:
@@ -214,23 +216,46 @@ def main() -> int:
         )
         if physical_deg_per_command_deg <= 0:
             physical_deg_per_command_deg = DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG
+        zero_command_angle = _clamp_angle(
+            _safe_float(
+                calib_cfg.get("zero_command_angle_deg", DEFAULT_ZERO_COMMAND_ANGLE_DEG),
+                DEFAULT_ZERO_COMMAND_ANGLE_DEG,
+            )
+        )
+        final_settle_sec = max(
+            0.0,
+            _safe_float(
+                calib_cfg.get("final_settle_sec", DEFAULT_FINAL_SETTLE_SEC),
+                DEFAULT_FINAL_SETTLE_SEC,
+            ),
+        )
         print(f"Logical azimuth: {state['logical_azimuth_deg']:.1f}°")
         print(f"Command angle: {state['command_angle_deg']:.1f}°")
         print(f"physical_deg_per_command_deg: {physical_deg_per_command_deg:.4f}")
+        print(f"zero_command_angle_deg: {zero_command_angle:.1f}°")
+        print(f"final_settle_sec: {final_settle_sec:.3f}s")
         print(f"Pulse range ({pulse_source}): {min_pulse * 1e6:.0f}us -> {max_pulse * 1e6:.0f}us")
         print(f"State file: {STATE_FILE}")
         return 0
 
     if args.command == "zero":
+        calib_cfg = _safe_dict(servo_cfg.get("calibration"))
+        zero_command_angle = _clamp_angle(
+            _safe_float(
+                calib_cfg.get("zero_command_angle_deg", DEFAULT_ZERO_COMMAND_ANGLE_DEG),
+                DEFAULT_ZERO_COMMAND_ANGLE_DEG,
+            )
+        )
         _save_state(
             STATE_FILE,
             0.0,
-            state["command_angle_deg"],
+            zero_command_angle,
             state.get("pulse_min_width_s"),
             state.get("pulse_max_width_s"),
         )
         print("Zero set.")
         print("Current physical position is now logical 0.0°.")
+        print(f"Command reference set to {zero_command_angle:.1f}°.")
         print(f"State file: {STATE_FILE}")
         return 0
 
@@ -290,6 +315,10 @@ def main() -> int:
     cw_increases_angle = _safe_bool(calib_cfg.get("cw_increases_angle", True), True)
     sweep_step = max(0.1, _safe_float(calib_cfg.get("sweep_step_deg", DEFAULT_SWEEP_STEP), DEFAULT_SWEEP_STEP))
     sweep_delay = max(0.0, _safe_float(calib_cfg.get("sweep_delay_sec", DEFAULT_SWEEP_DELAY_SEC), DEFAULT_SWEEP_DELAY_SEC))
+    final_settle_sec = max(
+        0.0,
+        _safe_float(calib_cfg.get("final_settle_sec", DEFAULT_FINAL_SETTLE_SEC), DEFAULT_FINAL_SETTLE_SEC),
+    )
     physical_deg_per_command_deg = _safe_float(
         calib_cfg.get("physical_deg_per_command_deg", DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG),
         DEFAULT_PHYSICAL_DEG_PER_COMMAND_DEG,
@@ -340,6 +369,8 @@ def main() -> int:
             servo.value = _angle_to_servo_value(angle)
             if sweep_delay > 0:
                 time.sleep(sweep_delay)
+        if final_settle_sec > 0:
+            time.sleep(final_settle_sec)
 
         _save_state(
             STATE_FILE,
@@ -356,6 +387,7 @@ def main() -> int:
         print(f"  command angle: {current_cmd_angle:.1f}° -> {target_cmd_angle:.1f}°")
         print(f"  command delta applied: {actual_cmd_delta:+.1f}°")
         print(f"  physical_deg_per_command_deg: {physical_deg_per_command_deg:.4f}")
+        print(f"  final_settle_sec: {final_settle_sec:.3f}s")
         print(f"  pulse range ({pulse_source}): {min_pulse * 1e6:.0f}us -> {max_pulse * 1e6:.0f}us")
         print(f"  cw_increases_angle: {cw_increases_angle}")
         return 0
