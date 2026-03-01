@@ -12,13 +12,15 @@ Horizontal coverage (18 azimuths at 20° intervals):
 - Front hemisphere (elev 0-180°): 0°, 20°, 40°, 60°, 80°, 100°, 120°, 140°, 160°
 - Back hemisphere (elev 180-360°): 180°, 200°, 220°, 240°, 260°, 280°, 300°, 320°, 340°
 
-Coordinate system:
+Coordinate system (Y-up convention):
+- X-axis: Forward at servo 0° (horizontal)
+- Y-axis: Vertical (up is positive)
+- Z-axis: Horizontal, perpendicular to X (right-hand rule)
 - Servo rotation = Base azimuth (horizontal angle, 0° to 160°)
 - Lidar rotation = Elevation (vertical angle, 0° to 360°)
-  - For elevation 0-180°: front hemisphere, azimuth = servo_angle
-  - For elevation 180-360°: back hemisphere, azimuth = servo_angle + 180°
+  - 0° = forward-horizontal, 90° = up, 180° = back-horizontal, 270° = down
 - Distance = Radial distance from lidar (meters)
-- 3D Cartesian: (azimuth, elevation, radius) → (x, y, z)
+- 3D Cartesian: (azimuth, elevation, radius) → (x, y, z) with Y-up
 - Minimum distance filter: 50mm (removes points too close to sensor)
 
 Motor speed control:
@@ -455,14 +457,14 @@ def run_scan(
                 elevation_rad = math.radians(elevation_deg)
                 azimuth_rad = math.radians(z_plane)
                 
-                # Spherical to Cartesian conversion for vertically-mounted lidar:
+                # Spherical to Cartesian conversion for vertically-mounted lidar (Y-up coordinate system):
                 # 1. Project point onto vertical circle at current servo orientation
+                y = r * math.sin(elevation_rad)  # height above horizontal plane (Y-up)
                 horizontal_distance = r * math.cos(elevation_rad)  # radial distance from vertical axis
-                z = r * math.sin(elevation_rad)  # height above horizontal plane
                 
-                # 2. Rotate horizontal component around vertical axis by servo angle
-                x = horizontal_distance * math.cos(azimuth_rad)
-                y = horizontal_distance * math.sin(azimuth_rad)
+                # 2. Rotate horizontal component around vertical (Y) axis by servo angle
+                x = horizontal_distance * math.sin(azimuth_rad)
+                z = horizontal_distance * math.cos(azimuth_rad)
                 
                 slice_3d.append((quality, elevation_deg, dist, x, y, z))
             
