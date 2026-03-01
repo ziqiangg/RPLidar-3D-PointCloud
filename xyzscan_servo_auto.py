@@ -7,13 +7,13 @@ Performs synchronized scanning:
 - RPLidar captures 2D slice (360° elevation) at each azimuth position
 - Slices are merged into final 3D point cloud
 
-Coordinate system:
+Coordinate system (VERTICAL lidar configuration):
 - Servo rotation = Azimuth (horizontal angle, 0° to 160°)
-- Lidar rotation = Elevation (vertical angle, 0° to 360°)
-  - For elevation 0-180°: front hemisphere
-  - For elevation 180-360°: back hemisphere (azimuth flipped by 180°)
+- Lidar rotation = Elevation in vertical plane (0° to 360°)
+  - 0°=forward horizontal, 90°=up, 180°=backward horizontal, 270°=down
+  - All points in one slice share the SAME azimuth (servo's angle)
 - Distance = Radial distance from lidar (meters)
-- 3D Cartesian: Spherical (azimuth, elevation, radius) → (x, y, z)
+- 3D Cartesian: Cylindrical-like projection (azimuth, elevation, radius) → (x, y, z)
 - Minimum distance filter: 50mm (removes points too close to sensor)
 
 Motor speed control:
@@ -440,27 +440,28 @@ def run_scan(
                 
                 r = dist / 1000.0  # mm to meters
                 
-                # Handle full 360° lidar rotation in vertical plane
-                # elevation_deg on vertical circle: 0°=forward-horizontal, 90°=up, 180°=back-horizontal, 270°=down
-                # For elevation > 180°, point is on opposite side (flip azimuth by 180°)
-                if elevation_deg > 180:
-                    # Back side of vertical circle
-                    effective_elevation = 360 - elevation_deg
-                    effective_azimuth = (z_plane + 180) % 360
-                else:
-                    # Front side of vertical circle
-                    effective_elevation = elevation_deg
-                    effective_azimuth = z_plane
+                # For VERTICAL lidar: All points in one slice have SAME azimuth (servo angle)
+                # elevation_deg: 0°=forward, 90°=up, 180°=backward, 270°=down
+                # The servo's z_plane angle applies to ALL points regardless of elevation
                 
-                elevation_rad = math.radians(effective_elevation)
-                azimuth_rad = math.radians(effective_azimuth)
+                # Convert elevation to work correctly in full 0-360° range
+                # Map to standard spherical coordinates: 0-90° = upper hemisphere, 90-180° = lower
+                if elevation_deg <= 180:
+                    # Front side: 0-180° maps directly
+                    theta = math.radians(elevation_deg)  # Angle from horizontal
+                else:
+                    # Back side: 180-360° → map to negative angles
+                    # 270° (straight down) → -90°, 360° → 0°
+                    theta = math.radians(elevation_deg - 360)
+                
+                azimuth_rad = math.radians(z_plane)  # Servo angle (constant per slice)
                 
                 # VERTICAL PLANE to Cartesian conversion:
-                # 1. Find components in the vertical plane
-                horizontal_distance = r * math.cos(elevation_rad)  # horizontal component in plane
-                z = r * math.sin(elevation_rad)  # vertical height
+                # For a vertical circle at azimuth angle:
+                horizontal_distance = r * math.cos(theta)  # horizontal distance from lidar
+                z = r * math.sin(theta)  # vertical height (+ up, - down)
                 
-                # 2. Project horizontal distance onto x,y based on azimuth direction
+                # Project horizontal distance onto x,y based on azimuth direction
                 x = horizontal_distance * math.cos(azimuth_rad)
                 y = horizontal_distance * math.sin(azimuth_rad)
                 
