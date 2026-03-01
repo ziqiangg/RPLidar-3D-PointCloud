@@ -232,6 +232,39 @@ class RPLidarViewerApp:
             
             viz_panel.add_fixed(em * 0.5)
             
+            # Reconstruction method selection
+            recon_label = gui.Label("Reconstruction Method:")
+            viz_panel.add_child(recon_label)
+            
+            self.recon_raw_checkbox = gui.Checkbox("Raw Points (cylindrical artifact)")
+            self.recon_raw_checkbox.checked = False
+            viz_panel.add_child(self.recon_raw_checkbox)
+            
+            self.recon_voxel_checkbox = gui.Checkbox("Voxel Grid (recommended for rooms)")
+            self.recon_voxel_checkbox.checked = True
+            viz_panel.add_child(self.recon_voxel_checkbox)
+            
+            self.recon_ball_checkbox = gui.Checkbox("Ball Pivoting Mesh")
+            self.recon_ball_checkbox.checked = False
+            viz_panel.add_child(self.recon_ball_checkbox)
+            
+            self.recon_poisson_checkbox = gui.Checkbox("Poisson Surface")
+            self.recon_poisson_checkbox.checked = False
+            viz_panel.add_child(self.recon_poisson_checkbox)
+            
+            viz_panel.add_fixed(em * 0.5)
+            
+            # Voxel size control
+            voxel_horiz = gui.Horiz(0.5 * em)
+            voxel_horiz.add_child(gui.Label("Voxel Size (m):"))
+            self.voxel_size_input = gui.TextEdit()
+            self.voxel_size_input.text_value = "0.05"
+            self.voxel_size_input.placeholder_text = "0.05"
+            voxel_horiz.add_child(self.voxel_size_input)
+            viz_panel.add_child(voxel_horiz)
+            
+            viz_panel.add_fixed(em * 0.5)
+            
             # Visualize button
             self.visualize_btn = gui.Button("Visualize in 3D Window")
             self.visualize_btn.set_on_clicked(self._on_visualize)
@@ -576,10 +609,38 @@ class RPLidarViewerApp:
             viewer_script = os.path.join(os.path.dirname(__file__), 'standalone_viewer.py')
             python_exe = sys.executable
             
-            # Build command
-            cmd = [python_exe, viewer_script, self.current_file, str(int(self.point_size))]
+            # Determine reconstruction method
+            if self.recon_raw_checkbox.checked:
+                method = "raw"
+            elif self.recon_voxel_checkbox.checked:
+                method = "voxel"
+            elif self.recon_ball_checkbox.checked:
+                method = "ball_pivoting"
+            elif self.recon_poisson_checkbox.checked:
+                method = "poisson"
+            else:
+                method = "voxel"  # Default
+            
+            # Get voxel size
+            try:
+                voxel_size = float(self.voxel_size_input.text_value.strip())
+                if voxel_size <= 0:
+                    voxel_size = 0.05
+            except:
+                voxel_size = 0.05
+            
+            # Build command with reconstruction parameters
+            cmd = [
+                python_exe,
+                viewer_script,
+                self.current_file,
+                str(int(self.point_size)),
+                method,
+                str(voxel_size)
+            ]
             
             print(f"[DEBUG] Launching viewer subprocess: {' '.join(cmd)}")
+            print(f"[DEBUG] Method: {method}, Voxel Size: {voxel_size}")
             
             # Use Popen to launch non-blocking subprocess
             subprocess.Popen(
@@ -587,7 +648,7 @@ class RPLidarViewerApp:
                 creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
             )
             
-            self._update_viz_status("Viewer window opened")
+            self._update_viz_status(f"Viewer opened with {method} reconstruction")
             print("[DEBUG] Viewer subprocess launched")
             
         except Exception as e:

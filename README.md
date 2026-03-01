@@ -29,6 +29,7 @@
 - ✅ **Chunked Transfer**: Large files sent in 256KB chunks
 - ✅ **Auto-reassembly**: Files automatically saved to `data/` folder
 - ✅ **GUI Integration**: Seamless Open3D visualization
+- ✅ **Surface Reconstruction**: Visualize actual 3D geometry (see [RECONSTRUCTION_GUIDE.md](RECONSTRUCTION_GUIDE.md))
 
 ---
 
@@ -79,6 +80,36 @@ python viewer/app.py
 
 ---
 
+## 🎨 3D Reconstruction & Visualization
+
+When scanning with a **vertically-mounted LiDAR** in a cube room, raw points appear as cylindrical surfaces (sampling geometry artifact). Use **surface reconstruction** to visualize actual 3D geometry.
+
+### Quick Start: Visualize with Reconstruction
+
+```bash
+# After performing a 3D scan:
+
+# Method 1: GUI (Recommended)
+python viewer/app.py
+# → Visualization tab → Load scan → Select "Voxel Grid" → Visualize
+
+# Method 2: Command Line
+python viewer/standalone_viewer.py data/scan_3d.csv 2 voxel 0.05
+```
+
+### Reconstruction Methods
+
+| Method | Best For | Command |
+|--------|----------|---------|
+| **Voxel Grid** ⭐ | Room scanning (recommended) | `voxel 0.05` |
+| Ball Pivoting | Sparse/uneven data | `ball_pivoting` |
+| Poisson | Dense, smooth surfaces | `poisson` |
+| Raw Points | Debug (shows cylinder artifact) | `raw` |
+
+**📖 See [RECONSTRUCTION_GUIDE.md](RECONSTRUCTION_GUIDE.md) for complete documentation**
+
+---
+
 ## 📁 Project Structure
 ```
 RPLidar-3D-PointCloud/
@@ -101,10 +132,16 @@ RPLidar-3D-PointCloud/
 │   ├── app.py                # Main GUI - file browser + 3D view
 │   ├── scan_controller.py    # MQTT-based scan control
 │   ├── point_cloud_loader.py # PLY/CSV file loading
+│   ├── standalone_viewer.py  # Subprocess viewer (avoids GLFW conflicts)
+│   ├── surface_reconstruction.py # 3D reconstruction module
 │   └── config.py             # GUI configuration
 │
 ├── dump_one_scan.py          # Core scanning script (RPi)
-├── xyzscan_servoless.py      # [DEPRECATED] 3D scanning
+├── xyzscan_servo_auto.py     # 3D scanning with servo control
+├── test_reconstruction.py    # Reconstruction verification script
+│
+├── RECONSTRUCTION_GUIDE.md   # Guide: Visualizing actual 3D geometry
+├── IMPLEMENTATION_SUMMARY.md # Implementation details and results
 │
 ├── utils/
 │   └── port_config.py        # Serial port detection
