@@ -6,6 +6,7 @@ All messages are serialized as JSON for transmission.
 
 import json
 import base64
+import os
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any
 from enum import Enum
@@ -217,9 +218,12 @@ class DataMessage:
         file_size = len(file_data)
         total_chunks = (file_size + chunk_size - 1) // chunk_size
         
+        # Extract filename using os.path.basename for cross-platform compatibility
+        filename = os.path.basename(file_path)
+        
         metadata = {
             'file_size': file_size,
-            'filename': file_path.split('/')[-1]
+            'filename': filename
         }
         
         for i in range(total_chunks):

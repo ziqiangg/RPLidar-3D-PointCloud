@@ -199,8 +199,12 @@ class ScanController:
             
             if status.status == "completed":
                 # Success
-                # Service writes scan.ply for both 2D and 3D scan modes.
-                output_file = config.SCAN_2D_PLY
+                # Determine output file based on scan type
+                if self.current_scan_type == config.SCAN_TYPE_3D:
+                    output_file = config.SCAN_3D_PLY
+                else:
+                    output_file = config.SCAN_2D_PLY
+                
                 if self.completion_callback:
                     self.completion_callback(self.current_scan_type, True, output_file)
             else:

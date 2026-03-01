@@ -16,6 +16,8 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 PERSISTENT_DIR = os.path.join(DATA_DIR, "persistent")
 SCAN_2D_CSV = os.path.join(DATA_DIR, "scan.csv")
 SCAN_2D_PLY = os.path.join(DATA_DIR, "scan.ply")
+SCAN_3D_CSV = os.path.join(DATA_DIR, "scan_3d.csv")
+SCAN_3D_PLY = os.path.join(DATA_DIR, "scan_3d.ply")
 
 # Visualization Settings
 POINT_SIZE = 2.0

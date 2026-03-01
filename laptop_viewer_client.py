@@ -12,7 +12,7 @@ import yaml
 import logging
 import time
 from pathlib import Path
-from typing import Optional, Callable, Dict
+from typing import Optional, Callable, Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -53,6 +53,7 @@ class LaptopViewerClient(MQTTClientBase):
         
         # Data reassembly buffers
         self.data_buffers: Dict[str, Dict] = {}  # scan_id -> buffer info
+        self.received_files_by_scan: Dict[str, List[str]] = {}  # scan_id -> list of file paths
         
         # Callbacks for GUI
         self.status_callback: Optional[Callable] = None
@@ -227,23 +228,42 @@ class LaptopViewerClient(MQTTClientBase):
                     return
                 file_data += buffer['chunks'][i]
             
-            # Save file
+            # Save file with original filename from metadata, or default to scan.ext
             file_extension = 'csv' if file_format == 'csv' else 'ply'
-            file_path = os.path.join(data_dir, f"scan.{file_extension}")
+            
+            # Get original filename from metadata if available
+            original_filename = None
+            if buffer.get('metadata') and isinstance(buffer['metadata'], dict):
+                original_filename = buffer['metadata'].get('filename')
+            
+            # Determine filename: use original if available, otherwise default
+            if original_filename:
+                filename = os.path.basename(original_filename)
+            else:
+                filename = f"scan.{file_extension}"
+            
+            file_path = os.path.join(data_dir, filename)
             
             with open(file_path, 'wb') as f:
                 f.write(file_data)
             
             self.logger.info(f"Saved {file_format} file: {file_path}")
             
+            # Track received file for this scan
+            if scan_id not in self.received_files_by_scan:
+                self.received_files_by_scan[scan_id] = []
+            self.received_files_by_scan[scan_id].append(file_path)
+            
             # Clean up buffer
             del self.data_buffers[buffer_key]
             
             # Notify callback if all files received
             if self.data_callback and self._all_files_received(scan_id):
-                csv_path = os.path.join(data_dir, "scan.csv")
-                ply_path = os.path.join(data_dir, "scan.ply")
-                self.data_callback(scan_id, [csv_path, ply_path])
+                received_files = self.received_files_by_scan.get(scan_id, [])
+                self.data_callback(scan_id, received_files)
+                # Clean up received files tracking
+                if scan_id in self.received_files_by_scan:
+                    del self.received_files_by_scan[scan_id]
                 
         except Exception as e:
             self.logger.error(f"Error reassembling file: {e}")

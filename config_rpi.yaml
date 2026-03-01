@@ -19,10 +19,17 @@ data:
 
 servo:
   pin: 18
-  min_pulse_width: 0.001
-  max_pulse_width: 0.002
-  # Physical servo calibration range used for logical azimuth 0..180 mapping.
-  # Keep at 0/180 for strict full-range behavior.
+  # Pulse width calibration from one_increment_test.py
+  min_pulse_width: 0.0005  # 0.5ms
+  max_pulse_width: 0.0025  # 2.5ms
+  # Physical and operational servo limits (from one_increment_test.py calibration)
+  physical_min: -90   # Physical minimum (hardware limit)
+  physical_max: 90    # Physical maximum (hardware limit)
+  operational_min: -75  # Calibrated operational start (produces 0° physical)
+  operational_max: 87   # Calibrated operational end (produces 180° physical)
+  step_size: 18        # Command angle step (produces 20° physical movement)
+  step_delay: 0.05     # Delay after servo movement (seconds)
+  # Legacy scan range (deprecated - use operational range above)
   scan_start_angle: 0
   scan_end_angle: 180
   settle_time: 0.08
@@ -55,22 +62,23 @@ servo:
     deg_per_sec_ccw: 120.0
 
 scan3d:
-  azimuth_start: 0
-  azimuth_end: 180
-  azimuth_step: 1
+  # 3D scan configuration (9 steps × 20° physical = 180° sweep)
+  num_steps: 9          # Total number of azimuth steps
+  physical_step_deg: 20  # Physical angular step between slices (degrees)
   # Delay between finishing a slice and requesting permission for next step.
   inter_slice_sleep: 1.0
   # Debug mode: require explicit MQTT step command before each next slice.
   step_permission_required: true
   # Anti-jitter: disable PWM holding while waiting for step permission.
   release_while_waiting: true
+  # Per-slice scan quality parameters (inherited from dump_one_scan.py)
   min_angle_resolution: 2.0
   min_coverage: 0.80
   relaxed_max_gap: 10.0
   max_scans_to_merge: 20
   plateau_patience: 5
-  slice_timeout: 5.0
-  lidar_timeout: 1.0
+  slice_timeout: 15.0
+  lidar_timeout: 3.0
   progress_every_slices: 1
   worker_stall_timeout: 20.0
   buffer_size: 5000
