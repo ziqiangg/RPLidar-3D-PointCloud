@@ -3,13 +3,15 @@ Automated 3D scanning with RPLidar and TD-8120MG servo.
 
 Performs synchronized scanning:
 - Servo steps through 9 positions (command angles -75° to +87° in 18° steps)
-- Each position produces 20° physical rotation (180° total sweep)
-- RPLidar captures 2D slice at each position
+- Each position produces 20° physical rotation (180° total azimuth sweep)
+- RPLidar captures 2D slice (360° elevation) at each azimuth position
 - Slices are merged into final 3D point cloud
 
 Coordinate system:
-- X, Y: From RPLidar 2D scan (meters)
-- Z: Azimuth plane index (0°, 20°, 40°, ..., 160°)
+- Servo rotation = Azimuth (horizontal angle, 0° to 160°)
+- Lidar rotation = Elevation (vertical angle, 0° to 360°)
+- Distance = Radial distance from lidar (meters)
+- 3D Cartesian: Spherical (azimuth, elevation, radius) → (x, y, z)
 """
 
 import csv
@@ -357,6 +359,22 @@ def run_scan(
                     'scan_quality': {}
                 }
             
+            # Restart motor before each slice (except first, which already has motor running)
+            if step_idx > 0:
+                try:
+                    lidar.start_motor()
+                    time.sleep(2)  # Allow motor to stabilize
+                except Exception as e:
+                    return {
+                        'success': False,
+                        'stopped': False,
+                        'point_count': total_points,
+                        'files': [],
+                        'error': f'Failed to restart motor for slice {step_idx + 1}',
+                        'message': f'Motor restart failed at slice {step_idx + 1}: {str(e)}',
+                        'scan_quality': {}
+                    }
+            
             # Calculate Z-plane for this slice
             z_plane = step_idx * physical_step_deg
             
@@ -397,18 +415,27 @@ def run_scan(
             # Validate slice quality
             is_valid, coverage, max_gap, point_count, quality_msg = validate_scan_quality(slice_data)
             
-            # Convert to 3D coordinates (add Z-plane)
+            # Convert to 3D coordinates using spherical coordinates
+            # Servo angle = azimuth (horizontal), Lidar angle = elevation (vertical)
             slice_3d = []
-            for quality, angle, dist in slice_data:
+            azimuth_rad = math.radians(z_plane)  # Servo angle (fixed per slice)
+            
+            for quality, elevation_deg, dist in slice_data:
                 if dist <= 0:
                     continue
-                # Convert polar to cartesian
+                
                 r = dist / 1000.0  # mm to meters
-                theta = math.radians(angle)
-                x = r * math.cos(theta)
-                y = r * math.sin(theta)
-                z = z_plane  # Azimuth angle as Z coordinate
-                slice_3d.append((quality, angle, dist, x, y, z))
+                elevation_rad = math.radians(elevation_deg)  # Lidar angle
+                
+                # Spherical to Cartesian: (azimuth, elevation, radius)
+                # x = r * cos(elevation) * cos(azimuth)
+                # y = r * cos(elevation) * sin(azimuth)
+                # z = r * sin(elevation)
+                x = r * math.cos(elevation_rad) * math.cos(azimuth_rad)
+                y = r * math.cos(elevation_rad) * math.sin(azimuth_rad)
+                z = r * math.sin(elevation_rad)
+                
+                slice_3d.append((quality, elevation_deg, dist, x, y, z))
             
             all_slices.extend(slice_3d)
             total_points += len(slice_3d)
@@ -423,6 +450,24 @@ def run_scan(
                 'coverage': coverage * 100,
                 'quality': quality_msg
             })
+            
+            # CRITICAL: Stop motor and clean buffer before moving to next position
+            # This prevents buffer overflow between slices
+            if step_idx < num_steps - 1:
+                try:
+                    lidar.stop()
+                    lidar.stop_motor()
+                    time.sleep(0.5)  # Allow motor to fully stop
+                    
+                    # Explicitly clear serial input buffer
+                    if hasattr(lidar, 'clean_input'):
+                        lidar.clean_input()
+                    elif hasattr(lidar, '_serial_port'):
+                        lidar._serial_port.reset_input_buffer()
+                        lidar._serial_port.reset_output_buffer()
+                except Exception as e:
+                    # Log but continue - buffer clear is best-effort
+                    pass
             
             # Wait between slices
             time.sleep(inter_slice_sleep)
@@ -469,6 +514,21 @@ def run_scan(
                 if next_command_angle <= servo_operational_max:
                     servo.set_angle(next_command_angle, wait_time=servo_step_delay)
                     current_command_angle = next_command_angle
+                else:
+                    # Servo angle exceeds operational max - should not happen with proper config
+                    progress_callback({
+                        'stage': 'error',
+                        'message': f'Servo angle {next_command_angle:.0f}° exceeds max {servo_operational_max}°'
+                    })
+                    return {
+                        'success': False,
+                        'stopped': False,
+                        'point_count': total_points,
+                        'files': [],
+                        'error': f'Servo calibration error: {next_command_angle:.0f}° > {servo_operational_max}°',
+                        'message': f'Servo angle exceeded operational limit',
+                        'scan_quality': {}
+                    }
         
         # All slices complete
         progress_callback({
@@ -486,7 +546,7 @@ def run_scan(
         csv_file = os.path.join(output_dir, "scan_3d.csv")
         with open(csv_file, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["quality", "angle_deg", "distance_mm", "x_m", "y_m", "z_deg"])
+            writer.writerow(["quality", "elevation_deg", "distance_mm", "x_m", "y_m", "z_m"])
             writer.writerows(all_slices)
         
         # Write PLY file

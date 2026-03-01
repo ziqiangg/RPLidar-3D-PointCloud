@@ -67,8 +67,8 @@ scan3d:
   physical_step_deg: 20  # Physical angular step between slices (degrees)
   # Delay between finishing a slice and requesting permission for next step.
   inter_slice_sleep: 1.0
-  # Debug mode: require explicit MQTT step command before each next slice.
-  step_permission_required: true
+  # Automatic mode: 3D scan runs fully automatically (no manual step commands needed)
+  step_permission_required: false
   # Anti-jitter: disable PWM holding while waiting for step permission.
   release_while_waiting: true
   # Per-slice scan quality parameters (inherited from dump_one_scan.py)
