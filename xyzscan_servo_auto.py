@@ -10,8 +10,11 @@ Performs synchronized scanning:
 Coordinate system:
 - Servo rotation = Azimuth (horizontal angle, 0° to 160°)
 - Lidar rotation = Elevation (vertical angle, 0° to 360°)
+  - For elevation 0-180°: front hemisphere
+  - For elevation 180-360°: back hemisphere (azimuth flipped by 180°)
 - Distance = Radial distance from lidar (meters)
 - 3D Cartesian: Spherical (azimuth, elevation, radius) → (x, y, z)
+- Minimum distance filter: 50mm (removes points too close to sensor)
 """
 
 import csv
@@ -105,17 +108,17 @@ def merge_scans(scans: List[List[Tuple]]) -> List[Tuple]:
         scans: List of scan lists, where each scan is [(quality, angle, distance), ...]
     
     Returns:
-        Merged scan with best measurements per 2-degree angle bin
+        Merged scan with best measurements per 1-degree angle bin
     """
     angle_bins = {}
     
     for scan in scans:
         for quality, angle, dist in scan:
-            if dist <= 0:
+            if dist <= 0 or dist < 50:  # Filter minimum distance (50mm)
                 continue
             
-            # 2-degree bins (matching dump_one_scan.py)
-            bin_idx = int(angle / 2.0)
+            # 1-degree bins for better resolution
+            bin_idx = int(angle / 1.0)
             
             # Keep measurement with best quality
             if bin_idx not in angle_bins or quality > angle_bins[bin_idx][0]:
@@ -124,15 +127,15 @@ def merge_scans(scans: List[List[Tuple]]) -> List[Tuple]:
     return list(angle_bins.values())
 
 
-def validate_scan_quality(scan: List[Tuple], min_resolution: float = 2.0,
-                         min_coverage: float = 0.80) -> Tuple[bool, float, float, int, str]:
+def validate_scan_quality(scan: List[Tuple], min_resolution: float = 1.0,
+                         min_coverage: float = 0.70) -> Tuple[bool, float, float, int, str]:
     """
-    Validate scan quality (matches dump_one_scan.py logic).
+    Validate scan quality with improved parameters for better coverage.
     
     Args:
         scan: List of (quality, angle, distance) tuples
         min_resolution: Maximum angle gap (degrees)
-        min_coverage: Minimum coverage fraction
+        min_coverage: Minimum coverage fraction (relaxed to 70%)
     
     Returns:
         (is_valid, coverage, max_gap, point_count, message)
@@ -145,7 +148,7 @@ def validate_scan_quality(scan: List[Tuple], min_resolution: float = 2.0,
     if len(angles) < 10:
         return False, 0.0, 360.0, len(angles), "Too few valid measurements"
     
-    # Calculate coverage in 2-degree bins
+    # Calculate coverage in 1-degree bins for finer resolution
     angle_bins = set()
     for angle in angles:
         bin_idx = int(angle / min_resolution)
@@ -163,8 +166,8 @@ def validate_scan_quality(scan: List[Tuple], min_resolution: float = 2.0,
             gap = (360 - angles[i]) + angles[next_i]
         max_gap = max(max_gap, gap)
     
-    # Relaxed validation for sparse scans
-    is_valid = coverage >= min_coverage and max_gap <= 10.0
+    # Relaxed validation for RPLidar A1 characteristics
+    is_valid = coverage >= min_coverage and max_gap <= 15.0
     message = f"Coverage: {coverage*100:.1f}%, Max gap: {max_gap:.1f}°, Points: {len(angles)}"
     
     return is_valid, coverage, max_gap, len(angles), message
@@ -182,9 +185,9 @@ def capture_2d_slice(lidar: RPLidar, scan_config: dict, should_stop: Callable) -
     Returns:
         List of (quality, angle, distance) tuples, or None if failed/stopped
     """
-    max_scans = scan_config.get('max_scans_to_merge', 10)
-    slice_timeout = scan_config.get('slice_timeout', 15.0)
-    plateau_patience = scan_config.get('plateau_patience', 3)
+    max_scans = scan_config.get('max_scans_to_merge', 20)
+    slice_timeout = scan_config.get('slice_timeout', 30.0)
+    plateau_patience = scan_config.get('plateau_patience', 5)
     
     t0 = time.time()
     collected_scans = []
@@ -418,14 +421,25 @@ def run_scan(
             # Convert to 3D coordinates using spherical coordinates
             # Servo angle = azimuth (horizontal), Lidar angle = elevation (vertical)
             slice_3d = []
-            azimuth_rad = math.radians(z_plane)  # Servo angle (fixed per slice)
             
             for quality, elevation_deg, dist in slice_data:
-                if dist <= 0:
+                # Filter out points too close to lidar (< 50mm)
+                if dist <= 0 or dist < 50:
                     continue
                 
                 r = dist / 1000.0  # mm to meters
-                elevation_rad = math.radians(elevation_deg)  # Lidar angle
+                
+                # Handle full 360° lidar rotation
+                # For elevation > 180°, point is on opposite side (flip azimuth)
+                if elevation_deg > 180:
+                    effective_elevation = 360 - elevation_deg
+                    effective_azimuth = (z_plane + 180) % 360
+                else:
+                    effective_elevation = elevation_deg
+                    effective_azimuth = z_plane
+                
+                elevation_rad = math.radians(effective_elevation)
+                azimuth_rad = math.radians(effective_azimuth)
                 
                 # Spherical to Cartesian: (azimuth, elevation, radius)
                 # x = r * cos(elevation) * cos(azimuth)
@@ -672,9 +686,9 @@ if __name__ == "__main__":
             'physical_step_deg': 20,
             'inter_slice_sleep': 1.0,
             'step_permission_required': True,
-            'max_scans_to_merge': 10,
-            'slice_timeout': 15.0,
-            'plateau_patience': 3
+            'max_scans_to_merge': 20,  # Increased for better coverage
+            'slice_timeout': 30.0,  # Increased timeout
+            'plateau_patience': 5  # More patience for coverage plateau
         },
         progress_callback=on_progress,
         wait_for_step=on_step

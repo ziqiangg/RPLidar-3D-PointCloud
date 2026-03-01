@@ -71,15 +71,16 @@ scan3d:
   step_permission_required: false
   # Anti-jitter: disable PWM holding while waiting for step permission.
   release_while_waiting: true
-  # Per-slice scan quality parameters (inherited from dump_one_scan.py)
-  min_angle_resolution: 2.0
-  min_coverage: 0.80
-  relaxed_max_gap: 10.0
-  max_scans_to_merge: 20
-  plateau_patience: 5
-  slice_timeout: 15.0
+  # Per-slice scan quality parameters (improved for better coverage)
+  min_angle_resolution: 1.0  # 1-degree bins for finer resolution
+  min_coverage: 0.70  # Relaxed to 70% for realistic RPLidar A1 performance
+  relaxed_max_gap: 15.0  # Allow up to 15° gaps
+  max_scans_to_merge: 20  # Increased to capture more data
+  plateau_patience: 5  # Wait for 5 plateau iterations
+  slice_timeout: 30.0  # Increased timeout for thorough coverage
   lidar_timeout: 3.0
   progress_every_slices: 1
+  min_distance_mm: 50  # Filter points closer than 50mm
   worker_stall_timeout: 20.0
   buffer_size: 5000
   
