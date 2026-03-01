@@ -350,7 +350,7 @@ def run_scan(
         lidar.motor_speed = motor_pwm
         
         lidar.start_motor()
-        time.sleep(3)  # Extra time for initial motor stabilization
+        time.sleep(4)  # Extended initial stabilization time for consistent motor speed
         
         progress_callback({
             'stage': 'scanning',
@@ -381,8 +381,10 @@ def run_scan(
             # Restart motor before each slice (except first, which already has motor running)
             if step_idx > 0:
                 try:
+                    # CRITICAL: Reset motor speed before restarting
+                    lidar.motor_speed = motor_pwm
                     lidar.start_motor()
-                    time.sleep(3)  # Extra time for motor stabilization (was 2s)
+                    time.sleep(4)  # Extended stabilization time for consistent speed
                 except Exception as e:
                     return {
                         'success': False,
@@ -546,7 +548,8 @@ def run_scan(
                 # Move servo to next position
                 next_command_angle = current_command_angle + servo_step_size
                 if next_command_angle <= servo_operational_max:
-                    servo.set_angle(next_command_angle, wait_time=servo_step_delay)
+                    # CRITICAL: Use longer settle time - servo needs 300-500ms for 20° movement
+                    servo.set_angle(next_command_angle, wait_time=0.5)
                     current_command_angle = next_command_angle
                 else:
                     # Servo angle exceeds operational max - should not happen with proper config
