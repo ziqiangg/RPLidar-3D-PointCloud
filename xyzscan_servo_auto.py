@@ -1,19 +1,24 @@
 """
 Automated 3D scanning with RPLidar and TD-8120MG servo.
 
-Performs synchronized scanning:
+Performs synchronized scanning with FULL 360° horizontal × 360° vertical coverage:
 - Servo steps through 9 positions (command angles -75° to +87° in 18° steps)
-- Each position produces 20° physical rotation (180° total azimuth sweep)
-- RPLidar captures 2D slice (360° elevation) at each azimuth position
-- Slices are merged into final 3D point cloud
+- Each position produces 20° physical rotation (180° servo sweep: 0° to 160°)
+- RPLidar captures 360° vertical slice at each servo position
+- Each vertical slice covers TWO horizontal directions (front + back)
+- Result: 9 servo positions × 2 directions = 18 azimuth slices = 360° coverage
 
-Coordinate system (VERTICAL lidar configuration):
-- Servo rotation = Azimuth (horizontal angle, 0° to 160°)
-- Lidar rotation = Elevation in vertical plane (0° to 360°)
-  - 0°=forward horizontal, 90°=up, 180°=backward horizontal, 270°=down
-  - All points in one slice share the SAME azimuth (servo's angle)
+Horizontal coverage (18 azimuths at 20° intervals):
+- Front hemisphere (elev 0-180°): 0°, 20°, 40°, 60°, 80°, 100°, 120°, 140°, 160°
+- Back hemisphere (elev 180-360°): 180°, 200°, 220°, 240°, 260°, 280°, 300°, 320°, 340°
+
+Coordinate system:
+- Servo rotation = Base azimuth (horizontal angle, 0° to 160°)
+- Lidar rotation = Elevation (vertical angle, 0° to 360°)
+  - For elevation 0-180°: front hemisphere, azimuth = servo_angle
+  - For elevation 180-360°: back hemisphere, azimuth = servo_angle + 180°
 - Distance = Radial distance from lidar (meters)
-- 3D Cartesian: Cylindrical-like projection (azimuth, elevation, radius) → (x, y, z)
+- 3D Cartesian: (azimuth, elevation, radius) → (x, y, z)
 - Minimum distance filter: 50mm (removes points too close to sensor)
 
 Motor speed control:
@@ -440,28 +445,27 @@ def run_scan(
                 
                 r = dist / 1000.0  # mm to meters
                 
-                # For VERTICAL lidar: All points in one slice have SAME azimuth (servo angle)
-                # elevation_deg: 0°=forward, 90°=up, 180°=backward, 270°=down
-                # The servo's z_plane angle applies to ALL points regardless of elevation
-                
-                # Convert elevation to work correctly in full 0-360° range
-                # Map to standard spherical coordinates: 0-90° = upper hemisphere, 90-180° = lower
-                if elevation_deg <= 180:
-                    # Front side: 0-180° maps directly
-                    theta = math.radians(elevation_deg)  # Angle from horizontal
+                # Handle full 360° lidar rotation in vertical plane
+                # elevation_deg on vertical circle: 0°=forward-horizontal, 90°=up, 180°=back-horizontal, 270°=down
+                # For elevation > 180°, point is on opposite side (flip azimuth by 180°)
+                if elevation_deg > 180:
+                    # Back side of vertical circle
+                    effective_elevation = 360 - elevation_deg
+                    effective_azimuth = (z_plane + 180) % 360
                 else:
-                    # Back side: 180-360° → map to negative angles
-                    # 270° (straight down) → -90°, 360° → 0°
-                    theta = math.radians(elevation_deg - 360)
+                    # Front side of vertical circle
+                    effective_elevation = elevation_deg
+                    effective_azimuth = z_plane
                 
-                azimuth_rad = math.radians(z_plane)  # Servo angle (constant per slice)
+                elevation_rad = math.radians(effective_elevation)
+                azimuth_rad = math.radians(effective_azimuth)
                 
                 # VERTICAL PLANE to Cartesian conversion:
-                # For a vertical circle at azimuth angle:
-                horizontal_distance = r * math.cos(theta)  # horizontal distance from lidar
-                z = r * math.sin(theta)  # vertical height (+ up, - down)
+                # 1. Find components in the vertical plane
+                horizontal_distance = r * math.cos(elevation_rad)  # horizontal component in plane
+                z = r * math.sin(elevation_rad)  # vertical height
                 
-                # Project horizontal distance onto x,y based on azimuth direction
+                # 2. Project horizontal distance onto x,y based on azimuth direction
                 x = horizontal_distance * math.cos(azimuth_rad)
                 y = horizontal_distance * math.sin(azimuth_rad)
                 
