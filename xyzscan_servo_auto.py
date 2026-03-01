@@ -15,6 +15,11 @@ Coordinate system:
 - Distance = Radial distance from lidar (meters)
 - 3D Cartesian: Spherical (azimuth, elevation, radius) → (x, y, z)
 - Minimum distance filter: 50mm (removes points too close to sensor)
+
+Motor speed control:
+- motor_pwm: 0-1023 (default=660)
+- Lower PWM = slower rotation = more samples per angle = better coverage
+- Recommended: 300-500 for high quality, 400 for best balance
 """
 
 import csv
@@ -114,7 +119,8 @@ def merge_scans(scans: List[List[Tuple]]) -> List[Tuple]:
     
     for scan in scans:
         for quality, angle, dist in scan:
-            if dist <= 0 or dist < 50:  # Filter minimum distance (50mm)
+            # Filter: minimum distance (50mm), minimum quality (10/15)
+            if dist <= 0 or dist < 50 or quality < 10:
                 continue
             
             # 1-degree bins for better resolution
@@ -128,14 +134,14 @@ def merge_scans(scans: List[List[Tuple]]) -> List[Tuple]:
 
 
 def validate_scan_quality(scan: List[Tuple], min_resolution: float = 1.0,
-                         min_coverage: float = 0.70) -> Tuple[bool, float, float, int, str]:
+                         min_coverage: float = 0.65) -> Tuple[bool, float, float, int, str]:
     """
     Validate scan quality with improved parameters for better coverage.
     
     Args:
         scan: List of (quality, angle, distance) tuples
         min_resolution: Maximum angle gap (degrees)
-        min_coverage: Minimum coverage fraction (relaxed to 70%)
+        min_coverage: Minimum coverage fraction (relaxed to 65%)
     
     Returns:
         (is_valid, coverage, max_gap, point_count, message)
@@ -167,7 +173,7 @@ def validate_scan_quality(scan: List[Tuple], min_resolution: float = 1.0,
         max_gap = max(max_gap, gap)
     
     # Relaxed validation for RPLidar A1 characteristics
-    is_valid = coverage >= min_coverage and max_gap <= 15.0
+    is_valid = coverage >= min_coverage and max_gap <= 20.0
     message = f"Coverage: {coverage*100:.1f}%, Max gap: {max_gap:.1f}°, Points: {len(angles)}"
     
     return is_valid, coverage, max_gap, len(angles), message
@@ -185,9 +191,10 @@ def capture_2d_slice(lidar: RPLidar, scan_config: dict, should_stop: Callable) -
     Returns:
         List of (quality, angle, distance) tuples, or None if failed/stopped
     """
-    max_scans = scan_config.get('max_scans_to_merge', 20)
-    slice_timeout = scan_config.get('slice_timeout', 30.0)
-    plateau_patience = scan_config.get('plateau_patience', 5)
+    max_scans = scan_config.get('max_scans_to_merge', 30)  # Increased for better coverage
+    slice_timeout = scan_config.get('slice_timeout', 45.0)  # More time for thorough scan
+    plateau_patience = scan_config.get('plateau_patience', 7)  # More patience before accepting
+    min_quality = scan_config.get('min_quality', 10)  # Minimum quality threshold
     
     t0 = time.time()
     collected_scans = []
@@ -212,15 +219,15 @@ def capture_2d_slice(lidar: RPLidar, scan_config: dict, should_stop: Callable) -
             # Validate quality
             is_valid, coverage, max_gap, point_count, message = validate_scan_quality(merged_scan)
             
-            # Check coverage plateau
-            if abs(coverage - last_coverage) < 0.01:
+            # Check coverage plateau (more sensitive threshold)
+            if abs(coverage - last_coverage) < 0.005:  # Was 0.01, now more sensitive
                 plateau_count += 1
             else:
                 plateau_count = 0
             last_coverage = coverage
             
-            # Accept if valid or plateaued
-            if is_valid or (plateau_count >= plateau_patience and len(collected_scans) >= 3):
+            # Accept if valid or plateaued (require more scans before plateau)
+            if is_valid or (plateau_count >= plateau_patience and len(collected_scans) >= 5):
                 return merged_scan
             
             # Stop conditions
@@ -296,6 +303,7 @@ def run_scan(
     physical_step_deg = scan_config.get('physical_step_deg', 20)
     inter_slice_sleep = scan_config.get('inter_slice_sleep', 1.0)
     step_permission_required = scan_config.get('step_permission_required', True)
+    motor_pwm = scan_config.get('motor_pwm', 660)  # Default RPLidar PWM
     
     # Initialize variables
     servo = None
@@ -310,7 +318,7 @@ def run_scan(
         
         progress_callback({
             'stage': 'init',
-            'message': f'Initializing servo and RPLidar on {port}...',
+            'message': f'Initializing servo and RPLidar on {port} (motor PWM: {motor_pwm})...',
             'slice_index': 0,
             'total_slices': num_steps
         })
@@ -333,8 +341,11 @@ def run_scan(
         info = lidar.get_info()
         health = lidar.get_health()
         
+        # Set motor speed (lower = slower = better quality, range 0-1023)
+        lidar.motor_speed = motor_pwm
+        
         lidar.start_motor()
-        time.sleep(2)  # Allow motor to stabilize
+        time.sleep(3)  # Extra time for initial motor stabilization
         
         progress_callback({
             'stage': 'scanning',
@@ -366,7 +377,7 @@ def run_scan(
             if step_idx > 0:
                 try:
                     lidar.start_motor()
-                    time.sleep(2)  # Allow motor to stabilize
+                    time.sleep(3)  # Extra time for motor stabilization (was 2s)
                 except Exception as e:
                     return {
                         'success': False,
@@ -418,8 +429,8 @@ def run_scan(
             # Validate slice quality
             is_valid, coverage, max_gap, point_count, quality_msg = validate_scan_quality(slice_data)
             
-            # Convert to 3D coordinates using spherical coordinates
-            # Servo angle = azimuth (horizontal), Lidar angle = elevation (vertical)
+            # Convert to 3D coordinates for VERTICAL rotating lidar
+            # The lidar spins in a VERTICAL PLANE, servo rotates that plane horizontally
             slice_3d = []
             
             for quality, elevation_deg, dist in slice_data:
@@ -429,25 +440,29 @@ def run_scan(
                 
                 r = dist / 1000.0  # mm to meters
                 
-                # Handle full 360° lidar rotation
-                # For elevation > 180°, point is on opposite side (flip azimuth)
+                # Handle full 360° lidar rotation in vertical plane
+                # elevation_deg on vertical circle: 0°=forward-horizontal, 90°=up, 180°=back-horizontal, 270°=down
+                # For elevation > 180°, point is on opposite side (flip azimuth by 180°)
                 if elevation_deg > 180:
+                    # Back side of vertical circle
                     effective_elevation = 360 - elevation_deg
                     effective_azimuth = (z_plane + 180) % 360
                 else:
+                    # Front side of vertical circle
                     effective_elevation = elevation_deg
                     effective_azimuth = z_plane
                 
                 elevation_rad = math.radians(effective_elevation)
                 azimuth_rad = math.radians(effective_azimuth)
                 
-                # Spherical to Cartesian: (azimuth, elevation, radius)
-                # x = r * cos(elevation) * cos(azimuth)
-                # y = r * cos(elevation) * sin(azimuth)
-                # z = r * sin(elevation)
-                x = r * math.cos(elevation_rad) * math.cos(azimuth_rad)
-                y = r * math.cos(elevation_rad) * math.sin(azimuth_rad)
-                z = r * math.sin(elevation_rad)
+                # VERTICAL PLANE to Cartesian conversion:
+                # 1. Find components in the vertical plane
+                horizontal_distance = r * math.cos(elevation_rad)  # horizontal component in plane
+                z = r * math.sin(elevation_rad)  # vertical height
+                
+                # 2. Project horizontal distance onto x,y based on azimuth direction
+                x = horizontal_distance * math.cos(azimuth_rad)
+                y = horizontal_distance * math.sin(azimuth_rad)
                 
                 slice_3d.append((quality, elevation_deg, dist, x, y, z))
             
@@ -686,9 +701,11 @@ if __name__ == "__main__":
             'physical_step_deg': 20,
             'inter_slice_sleep': 1.0,
             'step_permission_required': True,
-            'max_scans_to_merge': 20,  # Increased for better coverage
-            'slice_timeout': 30.0,  # Increased timeout
-            'plateau_patience': 5  # More patience for coverage plateau
+            'max_scans_to_merge': 30,  # Increased for better coverage
+            'slice_timeout': 45.0,  # Increased timeout
+            'plateau_patience': 7,  # More patience for coverage plateau
+            'min_quality': 10,  # Minimum quality filter
+            'motor_pwm': 400  # Slower motor for better coverage (0-1023, default=660)
         },
         progress_callback=on_progress,
         wait_for_step=on_step
