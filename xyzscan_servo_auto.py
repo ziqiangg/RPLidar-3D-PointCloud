@@ -447,27 +447,20 @@ def run_scan(
                 
                 r = dist / 1000.0  # mm to meters
                 
-                # Handle full 360° lidar rotation in vertical plane
-                # elevation_deg on vertical circle: 0°=forward-horizontal, 90°=up, 180°=back-horizontal, 270°=down
-                # For elevation > 180°, point is on opposite side (flip azimuth by 180°)
-                if elevation_deg > 180:
-                    # Back side of vertical circle
-                    effective_elevation = 360 - elevation_deg
-                    effective_azimuth = (z_plane + 180) % 360
-                else:
-                    # Front side of vertical circle
-                    effective_elevation = elevation_deg
-                    effective_azimuth = z_plane
+                # Direct transformation: elevation describes position on vertical circle
+                # RPLidar angle semantics:
+                #   0° = forward-horizontal, 90° = up, 180° = back-horizontal, 270° = down
+                # Servo angle (z_plane) = horizontal rotation of entire vertical plane
                 
-                elevation_rad = math.radians(effective_elevation)
-                azimuth_rad = math.radians(effective_azimuth)
+                elevation_rad = math.radians(elevation_deg)
+                azimuth_rad = math.radians(z_plane)
                 
-                # VERTICAL PLANE to Cartesian conversion:
-                # 1. Find components in the vertical plane
-                horizontal_distance = r * math.cos(elevation_rad)  # horizontal component in plane
-                z = r * math.sin(elevation_rad)  # vertical height
+                # Spherical to Cartesian conversion for vertically-mounted lidar:
+                # 1. Project point onto vertical circle at current servo orientation
+                horizontal_distance = r * math.cos(elevation_rad)  # radial distance from vertical axis
+                z = r * math.sin(elevation_rad)  # height above horizontal plane
                 
-                # 2. Project horizontal distance onto x,y based on azimuth direction
+                # 2. Rotate horizontal component around vertical axis by servo angle
                 x = horizontal_distance * math.cos(azimuth_rad)
                 y = horizontal_distance * math.sin(azimuth_rad)
                 
