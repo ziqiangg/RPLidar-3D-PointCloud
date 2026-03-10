@@ -488,13 +488,14 @@ class RPiScannerService(MQTTClientBase):
                 'scan_quality': {}
             }
 
-    def _run_scan_3d(self, port: str, scan_id: str) -> dict:
+    def _run_scan_3d(self, port: str, scan_id: str, scan_type: str = "3d") -> dict:
         """
-        Run automated 3D scan by importing xyzscan_servo_auto.run_scan().
+        Run automated 3D scan (standard or robust) in a separate process.
 
         Args:
             port: Serial port ("auto" or specific port like "/dev/ttyUSB0")
             scan_id: Scan identifier
+            scan_type: Type of scan ("3d" or "robust_3d")
 
         Returns:
             dict with keys: success, point_count, files, error, message, scan_quality
@@ -505,24 +506,9 @@ class RPiScannerService(MQTTClientBase):
                 from utils.port_config import get_default_port
                 port = get_default_port()
 
-            self.logger.info(f"Starting automated 3D scan on port: {port} (ID: {scan_id})")
+            self.logger.info(f"Starting automated {scan_type} scan on port: {port} (ID: {scan_id})")
             
-            # Check if this is a robust scan request based on scan_id prefix or just use default
-            # But the caller (execute_scan) should have passed scan type. 
-            # The current architectural method _run_scan_3d doesn't take scan_type as arg, 
-            # but we can infer it or we should update the method signature.
-            # However, looking at _execute_scan, it calls _run_scan_3d(command.port, command.scan_id).
-            # We can't easily change the signature without breaking things? 
-            # Actually we can change it in execute_scan too.
-            # But let's assume we can pass it via self or check command if available. 
-            # Wait, _execute_scan calls this. Let's fix _execute_scan to pass the type!
-            
-            # Temporary fix: pass scan_type via config injection or simple check.
-            # Better: Let's modify _execute_scan first to pass scan_type.
-            # But wait, I am editing only 2 files request.
-            # I should edit _execute_scan to pass scan_type to _run_scan_3d.
-
-            # Get output directory and optional 3D configs from service config
+            # Get output directory and configs
             data_dir = self.config['data']['output_dir']
             servo_cfg = self.config.get('servo', {})
             scan3d_cfg = self.config.get('scan3d', {})
@@ -531,14 +517,28 @@ class RPiScannerService(MQTTClientBase):
             process_stop_event = mp.Event()
             process_step_event = mp.Event()
             
-            # Infer scan type - normally we'd pass it.
-            # For now, let's look at the calling usage. 
-            # I will assume I will fix _execute_scan to pass it.
-            pass
-
-        except Exception as e:
-            pass # Just placeholder 
-
+            # Create worker process
+            # Note: _run_scan_3d_worker must be imported or available in scope
+            worker = mp.Process(
+                target=_run_scan_3d_worker,
+                args=(
+                    port, 
+                    data_dir, 
+                    servo_cfg, 
+                    scan3d_cfg, 
+                    process_stop_event, 
+                    process_step_event, 
+                    message_queue,
+                    scan_type 
+                )
+            )
+            
+            with self.state_lock:
+                self.active_process = worker
+                self.active_process_stop_event = process_stop_event
+                self.active_process_step_event = process_step_event
+            
+            worker.start()
 
             stop_grace_deadline = None
             result = None
@@ -550,14 +550,15 @@ class RPiScannerService(MQTTClientBase):
             )
 
             while True:
+                # Check for stop request (from MQTT or service shutdown)
                 if self.stop_requested.is_set():
                     if stop_grace_deadline is None:
                         process_stop_event.set()
                         process_step_event.set()
                         stop_grace_deadline = time.time() + 5.0
-                        self.logger.info("Waiting for 3D worker to stop gracefully")
+                        self.logger.info(f"Waiting for {scan_type} worker to stop gracefully")
                     elif worker.is_alive() and time.time() >= stop_grace_deadline:
-                        self.logger.warning("3D worker did not stop in time; terminating")
+                        self.logger.warning(f"{scan_type} worker did not stop in time; terminating")
                         worker.terminate()
                         worker.join(timeout=2.0)
                         if worker.is_alive():
@@ -571,7 +572,7 @@ class RPiScannerService(MQTTClientBase):
                             'point_count': 0,
                             'files': [],
                             'error': None,
-                            'message': '3D scan stopped by user',
+                            'message': f'{scan_type} scan stopped by user',
                             'scan_quality': {}
                         }
                         break
@@ -581,11 +582,12 @@ class RPiScannerService(MQTTClientBase):
                     msg_type = msg.get("type")
                     if msg_type == "progress":
                         progress = msg.get("data", {})
-                        message = progress.get('message', "3D scan in progress")
+                        message = progress.get('message', f"{scan_type} scan in progress")
                         point_count = progress.get('point_count')
                         stage = str(progress.get('stage', "") or "")
                         if stage:
                             last_progress_stage = stage
+                        # Forward progress to MQTT
                         self._publish_started_status(scan_id, message, point_count=point_count)
                         last_progress_at = time.time()
                     elif msg_type == "result":
@@ -618,84 +620,52 @@ class RPiScannerService(MQTTClientBase):
                     and last_progress_stage != "step_wait"
                     and (time.time() - last_progress_at) > worker_stall_timeout
                 ):
-                    self.logger.warning(
-                        f"3D worker stalled for >{worker_stall_timeout:.1f}s; terminating"
+                    self.logger.error(
+                        f"{scan_type} worker stalled for >{worker_stall_timeout:.1f}s; terminating"
                     )
                     worker.terminate()
-                    worker.join(timeout=2.0)
-                    if worker.is_alive():
-                        try:
-                            worker.kill()
-                        except Exception:
-                            pass
+                    worker.join(timeout=1.0)
                     result = {
                         'success': False,
                         'stopped': False,
                         'point_count': 0,
                         'files': [],
-                        'error': '3D worker stalled waiting for LiDAR data',
-                        'message': '3D scan failed: stalled waiting for LiDAR data',
+                        'error': "Worker process stalled",
+                        'message': "Scan worker stopped responding",
                         'scan_quality': {}
                     }
                     break
 
-                if not worker.is_alive():
-                    if result is None:
-                        # Attempt one final non-blocking drain.
-                        try:
-                            while True:
-                                msg = message_queue.get_nowait()
-                                msg_type = msg.get("type")
-                                if msg_type == "progress":
-                                    progress = msg.get("data", {})
-                                    message = progress.get('message', "3D scan in progress")
-                                    point_count = progress.get('point_count')
-                                    self._publish_started_status(scan_id, message, point_count=point_count)
-                                elif msg_type == "result":
-                                    result = msg.get("data")
-                                    break
-                        except queue.Empty:
-                            pass
-                    if result is None:
-                        if self.stop_requested.is_set():
-                            result = {
-                                'success': False,
-                                'stopped': True,
-                                'point_count': 0,
-                                'files': [],
-                                'error': None,
-                                'message': '3D scan stopped by user',
-                                'scan_quality': {}
-                            }
-                        else:
-                            result = {
-                                'success': False,
-                                'stopped': False,
-                                'point_count': 0,
-                                'files': [],
-                                'error': '3D worker exited without result',
-                                'message': '3D scan worker exited unexpectedly',
-                                'scan_quality': {}
-                            }
+                if not worker.is_alive() and result is None:
+                    # Worker died without sending result
+                    exit_code = worker.exitcode
+                    result = {
+                        'success': False,
+                        'stopped': False,
+                        'point_count': 0,
+                        'files': [],
+                        'error': f"Worker process crashed (exit code {exit_code})",
+                        'message': "Scan worker crashed unexpectedly",
+                        'scan_quality': {}
+                    }
                     break
-
-            worker.join(timeout=1.0)
-
+            
+            # Post-loop result handling
             if result is None:
-                result = {
+                 result = {
                     'success': False,
                     'stopped': False,
                     'point_count': 0,
                     'files': [],
-                    'error': 'Missing 3D worker result',
-                    'message': '3D scan failed: missing worker result',
+                    'error': "Unknown error",
+                    'message': "Scan worker finished without result",
                     'scan_quality': {}
                 }
 
             if result.get('stopped'):
-                self.logger.info(f"3D scan stopped: {result.get('message', 'Scan stopped by user')}")
+                self.logger.info(f"{scan_type} scan stopped: {result.get('message', 'Scan stopped by user')}")
             elif result['success']:
-                self.logger.info(f"3D scan completed: {result['message']}")
+                self.logger.info(f"{scan_type} scan completed: {result['message']}")
                 quality = result.get('scan_quality', {})
                 if quality:
                     self.logger.info(
@@ -705,12 +675,12 @@ class RPiScannerService(MQTTClientBase):
                         f"reset_completed={quality.get('reset_completed', False)}"
                     )
             else:
-                self.logger.error(f"3D scan failed: {result.get('error')}")
+                self.logger.error(f"{scan_type} scan failed: {result.get('error')}")
 
             return result
 
         except Exception as e:
-            self.logger.error(f"Error running 3D scan: {e}")
+            self.logger.error(f"Error running {scan_type} scan: {e}")
             self.logger.error(traceback.format_exc())
             return {
                 'success': False,
@@ -718,7 +688,7 @@ class RPiScannerService(MQTTClientBase):
                 'point_count': 0,
                 'files': [],
                 'error': str(e),
-                'message': f"3D scan execution error: {str(e)}",
+                'message': f"{scan_type} scan execution error: {str(e)}",
                 'scan_quality': {}
             }
         finally:
