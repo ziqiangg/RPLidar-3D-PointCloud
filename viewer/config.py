@@ -8,7 +8,8 @@ import os
 # Scan Types
 SCAN_TYPE_2D = "2d"
 SCAN_TYPE_3D = "3d"
-SUPPORTED_SCAN_TYPES = (SCAN_TYPE_2D, SCAN_TYPE_3D)
+SCAN_TYPE_ROBUST_3D = "robust_3d"
+SUPPORTED_SCAN_TYPES = (SCAN_TYPE_2D, SCAN_TYPE_3D, SCAN_TYPE_ROBUST_3D)
 
 # File Paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

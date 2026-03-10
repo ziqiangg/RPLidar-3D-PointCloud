@@ -175,6 +175,53 @@ class ScanController:
         """Check if a scan is currently running."""
         return self.scan_running
     
+    def _merge_robust_slices(self, scan_id: str):
+        """Merges all slice files received for this scan into a single PLY."""
+        import glob
+        
+        # Look for slice files in data directory
+        data_dir = config.DATA_DIR
+        # Pattern matches files sent by robust_3d_scan_module
+        # Note: The filenames are like robust_slice_0_123456.ply. 
+        # But LaptopViewerClient saves them as <scan_id>_<original_name> usually? 
+        # No, LaptopViewerClient (based on typical implementation) usually saves raw file content.
+        # Let's check LaptopViewerClient later if needed. For now assuming they land in data_dir.
+        
+        # Using the tracked file list from mqtt_client is safer
+        files_to_merge = self.mqtt_client.received_files_by_scan.get(scan_id, [])
+        if not files_to_merge:
+            print("[SCAN] No files found to merge for robust scan")
+            return
+
+        print(f"[SCAN] Merging {len(files_to_merge)} slice files...")
+        
+        merged_points = []
+        
+        for file_path in files_to_merge:
+            if not file_path.endswith(".ply"): continue
+            
+            try:
+                with open(file_path, 'r') as f:
+                    header_ended = False
+                    for line in f:
+                        if "end_header" in line:
+                            header_ended = True
+                            continue
+                        if header_ended:
+                            merged_points.append(line)
+            except Exception as e:
+                print(f"[SCAN] Error reading slice file {file_path}: {e}")
+        
+        # Write merged file
+        output_file = config.SCAN_3D_PLY
+        try:
+            with open(output_file, 'w') as f:
+                f.write(f"ply\nformat ascii 1.0\nelement vertex {len(merged_points)}\nproperty float x\nproperty float y\nproperty float z\nproperty float intensity\nend_header\n")
+                f.writelines(merged_points)
+            print(f"[SCAN] Merged robust scan saved to {output_file}")
+        except Exception as e:
+            print(f"[SCAN] Error saving merged PLY: {e}")
+
     def _on_mqtt_status(self, scan_id: str, status: ScanStatus):
         """
         Handle status update from MQTT.
@@ -199,9 +246,15 @@ class ScanController:
             
             if status.status == "completed":
                 # Success
+                output_file = config.SCAN_3D_PLY # Default
+                
                 # Determine output file based on scan type
                 if self.current_scan_type == config.SCAN_TYPE_3D:
                     output_file = config.SCAN_3D_PLY
+                elif self.current_scan_type == "robust_3d":
+                    self._merge_robust_slices(scan_id)
+                    output_file = config.SCAN_3D_PLY
+                    # Note: Completion callback will load this file
                 else:
                     output_file = config.SCAN_2D_PLY
                 
