@@ -63,7 +63,7 @@ servo:
 
 scan3d:
   # 3D scan configuration (9 steps × 20° physical = 180° sweep)
-  num_steps: 9          # Total number of azimuth steps
+  num_steps: 33          # Total number of azimuth steps
   physical_step_deg: 20  # Physical angular step between slices (degrees)
   # Delay between finishing a slice and requesting permission for next step.
   inter_slice_sleep: 2.0  # Increased to ensure motor fully stops between slices

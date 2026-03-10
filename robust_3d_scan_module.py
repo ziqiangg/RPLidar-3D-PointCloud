@@ -359,6 +359,30 @@ def run_scan(
             
             # STREAMING: Send this file immediately
             file_callback(slice_path)
+        
+        # --- Automatic Stitching ---
+        if all_points_3d:
+            timestamp = time.strftime("%H%M%S")
+            stitched_filename = f"robust_scan_full_{timestamp}.ply"
+            stitched_path = os.path.join(output_dir, stitched_filename)
+            
+            progress_callback({'stage': 'saving', 'message': 'Saving stitched point cloud...'})
+            
+            with open(stitched_path, 'w') as f:
+                f.write("ply\n")
+                f.write("format ascii 1.0\n")
+                f.write(f"element vertex {len(all_points_3d)}\n")
+                f.write("property float x\n")
+                f.write("property float y\n")
+                f.write("property float z\n")
+                f.write("property float intensity\n")
+                f.write("end_header\n")
+                for p in all_points_3d:
+                    f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {p[4]}\n")
+            
+            generated_files.append(stitched_path)
+            # Send the stitched file so the viewer can load the full model at once
+            file_callback(stitched_path)
             
     except Exception as e:
         return {
