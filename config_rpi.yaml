@@ -18,48 +18,11 @@ data:
   formats: ["csv", "ply"]  # Generate both formats
 
 servo:
-  pin: 18
-  # Pulse width calibration from one_increment_test.py
-  min_pulse_width: 0.0005  # 0.5ms
-  max_pulse_width: 0.0025  # 2.5ms
-  # Physical and operational servo limits (from one_increment_test.py calibration)
-  physical_min: -90   # Physical minimum (hardware limit)
-  physical_max: 90    # Physical maximum (hardware limit)
-  operational_min: -75  # Calibrated operational start (produces 0° physical)
-  operational_max: 87   # Calibrated operational end (produces 180° physical)
-  step_size: 18        # Command angle step (produces 20° physical movement)
-  step_delay: 0.5      # Delay after servo movement (seconds) - increased for 20° settling
-  # Legacy scan range (deprecated - use operational range above)
-  scan_start_angle: 0
-  scan_end_angle: 180
-  settle_time: 0.08
-  release_after_move: false
-  reset_settle_time: 0.02
-  calibration:
-    # If cw command moves wrong way, set this to false.
-    cw_increases_angle: false
-    # Scale factor to map command-angle movement to real physical movement.
-    # Example: if 180 command-deg produces ~60 physical-deg, set to 0.3333.
-    physical_deg_per_command_deg: 1.0
-    # Deadband helper: enforce at least this much command-angle change per step.
-    # Set to 0 to disable. Increase if 1° commands do not physically move.
-    min_command_step_deg: 2.0
-    # Smooth motion granularity for set_servo_azimuth.py
-    sweep_step_deg: 1.0
-    sweep_delay_sec: 0.01
-    # Keep PWM active briefly after the final command so small steps can settle.
-    final_settle_sec: 0.15
-  # Optional continuous-rotation calibration values (reserved for future tuning).
-  continuous:
-    # Continuous-servo range can be wider than positional 1ms..2ms.
-    # set_servo_azimuth.py uses this pulse range first for calibration moves.
-    min_pulse_width: 0.0005
-    max_pulse_width: 0.0035
-    neutral_value: 0.0
-    cw_value: 0.9
-    ccw_value: -0.9
-    deg_per_sec_cw: 120.0
-    deg_per_sec_ccw: 120.0
+  # Using Pico W as serial servo controller
+  serial_port: "/dev/ttyACM0"  # Default pico serial port
+  baudrate: 115200
+  timeout: 5.0
+  settle_time: 0.5             # Wait time after "DONE" before scan starts
 
 scan3d:
   # 3D scan configuration (9 steps × 20° physical = 180° sweep)

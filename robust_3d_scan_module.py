@@ -13,9 +13,8 @@ import statistics
 import traceback
 from typing import List, Tuple, Optional, Callable
 import numpy as np
+import serial
 from rplidar import RPLidar
-from gpiozero import AngularServo
-from gpiozero.pins.lgpio import LGPIOFactory
 
 # ==============================================================================
 # DEFAULT CONFIGURATION
@@ -25,13 +24,12 @@ DEFAULTS = {
     'lidar_port': '/dev/ttyUSB0',
     'lidar_baudrate': 115200,
     'lidar_pwm': 400,
-    'servo_pin': 18,
-    'servo_min_angle': -90,
-    'servo_max_angle': 90,
-    'servo_min_pulse': 0.0005,
-    'servo_max_pulse': 0.0025,
-    'sweep_start': -75,
-    'sweep_end': 87,
+    'servo_serial_port': '/dev/ttyACM0',
+    'servo_baudrate': 115200,
+    'servo_timeout': 5.0,
+    'servo_settle_time': 0.5,
+    'sweep_start': 0,
+    'sweep_end': 180,
     'num_steps': 20,
     'max_scans': 40,
     'min_scans': 10,
@@ -46,37 +44,53 @@ DEFAULTS = {
 # HARDWARE CLASSES
 # ==============================================================================
 
-class ServoTD8120MG:
+class PicoServoController:
     """
-    TD-8120MG servo controller using gpiozero.
-    Calibrated for precise angular positioning with custom pulse widths.
+    Control servo via serial commands to Pico W.
+    Format: ANGLE:<angle> -> DONE:<angle>
     """
-    def __init__(self, pin: int, min_angle: float = -90, max_angle: float = 90,
-                 min_pulse_width: float = 0.5, max_pulse_width: float = 2.5):
-        factory = LGPIOFactory()
-        self.min_angle = min_angle
-        self.max_angle = max_angle
-        
-        self.servo = AngularServo(
-            pin,
-            min_angle=min_angle,
-            max_angle=max_angle,
-            min_pulse_width=min_pulse_width,
-            max_pulse_width=max_pulse_width,
-            frame_width=0.02, # 20ms (50Hz)
-            pin_factory=factory
-        )
+    def __init__(self, port='/dev/ttyACM0', baudrate=115200, timeout=1.0):
+        self.ser = serial.Serial(port, baudrate, timeout=timeout)
+        time.sleep(2.0) # Allow Pico to reset/initialize if needed
         self.current_angle = 0
+        
+    def set_angle(self, angle: float):
+        """
+        Send angle command and wait for completion.
+        """
+        # Ensure angle is a float and formatted correctly
+        cmd = f"ANGLE:{float(angle):.2f}\n"
+        
+        # Flush input to clear any old messages
+        self.ser.reset_input_buffer()
+        
+        # Send command
+        self.ser.write(cmd.encode('utf-8'))
+        
+        # Wait for DONE response
+        # We expect "DONE:<angle>"
+        start_time = time.time()
+        while True:
+            if time.time() - start_time > self.ser.timeout:
+                raise TimeoutError(f"Timeout waiting for servo move to {angle}")
+                
+            line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+            if not line:
+                continue
 
-    def set_angle(self, angle: float, wait_time: float = 0.5):
-        if angle < self.min_angle: angle = self.min_angle
-        if angle > self.max_angle: angle = self.max_angle
-        self.servo.angle = angle
-        self.current_angle = angle
-        time.sleep(wait_time)
+            print(f"[Pico] {line}")
+            
+            if line.startswith("DONE:"):
+                self.current_angle = angle
+                break
+
+            if line.startswith("ERR:"):
+                raise RuntimeError(f"Pico servo error: {line}")
+                        
 
     def detach(self):
-        self.servo.detach()
+        if self.ser and self.ser.is_open:
+            self.ser.close()
 
 # ==============================================================================
 # ROBUST SCANNING LOGIC
@@ -229,16 +243,19 @@ def run_scan(
     # Resolve parameters
     lidar_port = port if port != "auto" else DEFAULTS['lidar_port']
     
-    servo_pin = servo_config.get('pin', DEFAULTS['servo_pin'])
-    servo_min = servo_config.get('physical_min', DEFAULTS['servo_min_angle'])
-    servo_max = servo_config.get('physical_max', DEFAULTS['servo_max_angle'])
-    servo_min_pulse = servo_config.get('min_pulse_width', DEFAULTS['servo_min_pulse'])
-    servo_max_pulse = servo_config.get('max_pulse_width', DEFAULTS['servo_max_pulse'])
-    
+    # New Serial Servo Config
+    servo_port = servo_config.get('serial_port', DEFAULTS['servo_serial_port'])
+    if servo_port == "auto" or servo_port is None: 
+        servo_port = DEFAULTS['servo_serial_port']
+        
+    servo_baud = int(servo_config.get('baudrate', DEFAULTS['servo_baudrate']))
+    servo_timeout = float(servo_config.get('timeout', DEFAULTS['servo_timeout']))
+    servo_settle = float(servo_config.get('settle_time', DEFAULTS['servo_settle_time']))
+
     # Use scan_config if available, else DEFAULTS
-    sweep_start = scan_config.get('sweep_start', DEFAULTS['sweep_start'])
-    sweep_end = scan_config.get('sweep_end', DEFAULTS['sweep_end'])
-    num_steps = scan_config.get('num_steps', DEFAULTS['num_steps'])
+    sweep_start = float(scan_config.get('sweep_start', DEFAULTS['sweep_start']))
+    sweep_end = float(scan_config.get('sweep_end', DEFAULTS['sweep_end']))
+    num_steps = int(scan_config.get('num_steps', DEFAULTS['num_steps']))
     
     # Robust Capture Config
     capture_config = {
@@ -264,13 +281,8 @@ def run_scan(
         progress_callback({'stage': 'init', 'message': 'Initializing robust scan hardware...'})
         
         # 1. Setup Servo
-        servo = ServoTD8120MG(
-            servo_pin, 
-            min_angle=servo_min, 
-            max_angle=servo_max,
-            min_pulse_width=servo_min_pulse,
-            max_pulse_width=servo_max_pulse
-        )
+        print(f"Connecting to servo on {servo_port} @ {servo_baud}...")
+        servo = PicoServoController(servo_port, baudrate=servo_baud, timeout=servo_timeout)
         
         # 2. Setup Lidar
         lidar = RPLidar(lidar_port, baudrate=DEFAULTS['lidar_baudrate'])
@@ -295,8 +307,11 @@ def run_scan(
                 'total_slices': len(steps)
             })
             
-            # Move Servo
+            # Move Servo (will wait for DONE response)
             servo.set_angle(servo_angle)
+            
+            # Settle time after movement
+            time.sleep(servo_settle)
             
             # Reset Lidar to clear buffer (crucial for accurate slices)
             try:
