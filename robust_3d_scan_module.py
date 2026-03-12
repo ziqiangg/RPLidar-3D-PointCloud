@@ -28,8 +28,8 @@ DEFAULTS = {
     'servo_baudrate': 115200,
     'servo_timeout': 5.0,
     'servo_settle_time': 0.5,
-    'sweep_start': 0,
-    'sweep_end': 180,
+    'sweep_start': 180,
+    'sweep_end': 0,
     'num_steps': 20,
     'max_scans': 40,
     'min_scans': 10,
@@ -52,6 +52,10 @@ class PicoServoController:
     def __init__(self, port='/dev/ttyACM0', baudrate=115200, timeout=1.0):
         self.ser = serial.Serial(port, baudrate, timeout=timeout)
         time.sleep(2.0) # Allow Pico to reset/initialize if needed
+        try:
+            self.ser.reset_input_buffer()
+        except Exception:
+            pass
         self.current_angle = 0
         
     def set_angle(self, angle: float):
@@ -62,7 +66,10 @@ class PicoServoController:
         cmd = f"ANGLE:{float(angle):.2f}\n"
         
         # Flush input to clear any old messages
-        self.ser.reset_input_buffer()
+        try:
+            self.ser.reset_input_buffer()
+        except Exception:
+            pass
         
         # Send command
         self.ser.write(cmd.encode('utf-8'))
@@ -378,6 +385,8 @@ def run_scan(
         # --- Automatic Stitching ---
         if all_points_3d:
             timestamp = time.strftime("%H%M%S")
+            
+            # 1. Save PLY
             stitched_filename = f"robust_scan_full_{timestamp}.ply"
             stitched_path = os.path.join(output_dir, stitched_filename)
             
@@ -398,6 +407,20 @@ def run_scan(
             generated_files.append(stitched_path)
             # Send the stitched file so the viewer can load the full model at once
             file_callback(stitched_path)
+
+            # 2. Save CSV
+            stitched_csv_filename = f"robust_scan_full_{timestamp}.csv"
+            stitched_csv_path = os.path.join(output_dir, stitched_csv_filename)
+
+            with open(stitched_csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["x", "y", "z", "distance", "quality"])
+                for p in all_points_3d:
+                    # p = (x, y, z, distance, quality)
+                    writer.writerow([f"{p[0]:.4f}", f"{p[1]:.4f}", f"{p[2]:.4f}", f"{p[3]:.4f}", int(p[4])])
+
+            generated_files.append(stitched_csv_path)
+            file_callback(stitched_csv_path)
             
     except Exception as e:
         return {
