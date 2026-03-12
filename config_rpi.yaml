@@ -26,8 +26,8 @@ servo:
 
 scan3d:
   # 3D scan configuration (9 steps × 20° physical = 180° sweep)
-  sweep_start: 180       # Start angle (right)
-  sweep_end: 0           # End angle (left)
+  sweep_start: 0
+  sweep_end: 180
   num_steps: 35          # Total number of servo steps
   # Delay between finishing a slice and requesting permission for next step.
   inter_slice_sleep: 2.0  # Increased to ensure motor fully stops between slices

@@ -28,8 +28,8 @@ DEFAULTS = {
     'servo_baudrate': 115200,
     'servo_timeout': 5.0,
     'servo_settle_time': 0.5,
-    'sweep_start': 180,
-    'sweep_end': 0,
+    'sweep_start': 0,
+    'sweep_end': 180,
     'num_steps': 20,
     'max_scans': 40,
     'min_scans': 10,
@@ -337,7 +337,8 @@ def run_scan(
             
             # Process to 3D and Save Slice
             slice_points_3d = []
-            beta = math.radians(servo_angle)
+            # Negate angle to fix left/right mirroring
+            beta = math.radians(-servo_angle)
             
             for qual, lidar_angle_deg, r_mm in slice_points_2d:
                 r_m = r_mm / 1000.0
