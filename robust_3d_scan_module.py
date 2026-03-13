@@ -254,6 +254,141 @@ def capture_robust_slice(lidar: RPLidar, slice_name: str, config: dict) -> Tuple
     print(f"  > Slice complete. {len(merged_points)} valid points.")
     return merged_points, had_io_error
 
+
+def _voxel_downsample_points(
+    points: List[Tuple[float, float, float, float, float]],
+    voxel_size_m: float,
+) -> List[Tuple[float, float, float, float, float]]:
+    """Downsample cloud by voxel grid while preserving average geometry and max quality."""
+    if voxel_size_m <= 0.0 or len(points) <= 1:
+        return points
+
+    pts = np.asarray(points, dtype=np.float64)
+    xyz = pts[:, :3]
+    voxel_idx = np.floor(xyz / voxel_size_m).astype(np.int64)
+
+    _, _, inverse = np.unique(voxel_idx, axis=0, return_index=True, return_inverse=True)
+    voxel_count = int(inverse.max()) + 1 if inverse.size else 0
+    if voxel_count == 0:
+        return points
+
+    counts = np.bincount(inverse, minlength=voxel_count).astype(np.float64)
+    sum_x = np.bincount(inverse, weights=pts[:, 0], minlength=voxel_count)
+    sum_y = np.bincount(inverse, weights=pts[:, 1], minlength=voxel_count)
+    sum_z = np.bincount(inverse, weights=pts[:, 2], minlength=voxel_count)
+    sum_d = np.bincount(inverse, weights=pts[:, 3], minlength=voxel_count)
+
+    max_q = np.full(voxel_count, -np.inf, dtype=np.float64)
+    for i, v_idx in enumerate(inverse):
+        q = pts[i, 4]
+        if q > max_q[v_idx]:
+            max_q[v_idx] = q
+
+    reduced = []
+    for v_idx in range(voxel_count):
+        c = counts[v_idx]
+        if c <= 0:
+            continue
+        reduced.append(
+            (
+                float(sum_x[v_idx] / c),
+                float(sum_y[v_idx] / c),
+                float(sum_z[v_idx] / c),
+                float(sum_d[v_idx] / c),
+                float(max_q[v_idx]),
+            )
+        )
+
+    return reduced
+
+
+def _sor_filter_points(
+    points: List[Tuple[float, float, float, float, float]],
+    neighbors: int,
+    std_ratio: float,
+    radius_m: float,
+    max_points: int,
+    max_runtime_s: float,
+) -> Tuple[List[Tuple[float, float, float, float, float]], str]:
+    """Apply a guarded SOR pass using local radius neighborhoods via spatial hashing."""
+    n_points = len(points)
+    if n_points <= 4:
+        return points, "sor_skipped_too_few_points"
+
+    if n_points > max_points:
+        return points, f"sor_skipped_point_cutoff_{n_points}>{max_points}"
+
+    k = max(1, int(neighbors))
+    radius = max(1e-6, float(radius_m))
+    radius2 = radius * radius
+    t0 = time.time()
+
+    pts = np.asarray(points, dtype=np.float64)
+    xyz = pts[:, :3]
+    grid = np.floor(xyz / radius).astype(np.int64)
+
+    buckets = {}
+    for idx, cell in enumerate(grid):
+        key = (int(cell[0]), int(cell[1]), int(cell[2]))
+        buckets.setdefault(key, []).append(idx)
+
+    offsets = [
+        (dx, dy, dz)
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        for dz in (-1, 0, 1)
+    ]
+
+    mean_neighbor_dist = np.full(n_points, np.nan, dtype=np.float64)
+
+    for i, cell in enumerate(grid):
+        if max_runtime_s > 0 and (time.time() - t0) > max_runtime_s:
+            return points, f"sor_skipped_timeout_{max_runtime_s:.1f}s"
+
+        cx, cy, cz = int(cell[0]), int(cell[1]), int(cell[2])
+        candidates = []
+        for dx, dy, dz in offsets:
+            candidates.extend(buckets.get((cx + dx, cy + dy, cz + dz), []))
+
+        if len(candidates) <= 1:
+            continue
+
+        cand = np.asarray([j for j in candidates if j != i], dtype=np.int64)
+        if cand.size == 0:
+            continue
+
+        diff = xyz[cand] - xyz[i]
+        d2 = np.einsum('ij,ij->i', diff, diff)
+        within = d2 <= radius2
+        if np.any(within):
+            d2 = d2[within]
+        if d2.size == 0:
+            continue
+
+        k_eff = min(k, d2.size)
+        nearest = np.partition(d2, k_eff - 1)[:k_eff]
+        mean_neighbor_dist[i] = float(np.mean(np.sqrt(nearest)))
+
+    valid = ~np.isnan(mean_neighbor_dist)
+    valid_count = int(np.sum(valid))
+    if valid_count < max(10, int(0.25 * n_points)):
+        return points, "sor_skipped_insufficient_neighbors"
+
+    valid_vals = mean_neighbor_dist[valid]
+    mu = float(np.mean(valid_vals))
+    sigma = float(np.std(valid_vals))
+    threshold = mu + (float(std_ratio) * sigma)
+
+    keep_mask = valid & (mean_neighbor_dist <= threshold)
+    kept = int(np.sum(keep_mask))
+    if kept < max(10, int(0.35 * n_points)):
+        return points, "sor_skipped_over_prune_guard"
+
+    keep_idx = np.where(keep_mask)[0]
+    filtered = [points[i] for i in keep_idx]
+    removed = n_points - kept
+    return filtered, f"sor_applied_removed_{removed}"
+
 # ==============================================================================
 # MAIN 3D SCAN ROUTINE (Wrapped for MQTT)
 # ==============================================================================
@@ -456,6 +591,49 @@ def run_scan(
         
         # --- Automatic Stitching ---
         if all_points_3d:
+            raw_points = all_points_3d
+            processed_points = raw_points
+
+            # 1) Voxel downsample for payload reduction and local denoising.
+            voxel_size_m = float(scan_config.get('voxel_size_m', 0.0))
+            if voxel_size_m > 0.0:
+                before = len(processed_points)
+                processed_points = _voxel_downsample_points(processed_points, voxel_size_m)
+                progress_callback({
+                    'stage': 'filtering',
+                    'message': (
+                        f'Voxel downsample ({voxel_size_m:.4f}m): '
+                        f'{before} -> {len(processed_points)} points'
+                    ),
+                    'point_count': len(processed_points),
+                })
+
+            # 2) Optional SOR pass with automatic safety cutoffs for RP5 latency.
+            sor_neighbors = int(scan_config.get('sor_neighbors', 0))
+            sor_std_ratio = float(scan_config.get('sor_std_ratio', 0.0))
+            sor_radius_m = float(scan_config.get('sor_radius_m', 0.0))
+            sor_max_points = int(scan_config.get('sor_max_points', 12000))
+            sor_max_runtime_s = float(scan_config.get('sor_max_runtime_s', 2.5))
+            sor_note = 'sor_disabled'
+            if sor_neighbors > 0 and sor_std_ratio > 0.0 and sor_radius_m > 0.0:
+                before = len(processed_points)
+                processed_points, sor_note = _sor_filter_points(
+                    processed_points,
+                    neighbors=sor_neighbors,
+                    std_ratio=sor_std_ratio,
+                    radius_m=sor_radius_m,
+                    max_points=sor_max_points,
+                    max_runtime_s=sor_max_runtime_s,
+                )
+                progress_callback({
+                    'stage': 'filtering',
+                    'message': (
+                        f'SOR ({sor_note}): {before} -> {len(processed_points)} points '
+                        f'(k={sor_neighbors}, std={sor_std_ratio:.2f}, r={sor_radius_m:.3f}m)'
+                    ),
+                    'point_count': len(processed_points),
+                })
+
             # 1. Save PLY
             stitched_filename = "robust_scan_full.ply"
             stitched_path = os.path.join(output_dir, stitched_filename)
@@ -465,13 +643,13 @@ def run_scan(
             with open(stitched_path, 'w') as f:
                 f.write("ply\n")
                 f.write("format ascii 1.0\n")
-                f.write(f"element vertex {len(all_points_3d)}\n")
+                f.write(f"element vertex {len(processed_points)}\n")
                 f.write("property float x\n")
                 f.write("property float y\n")
                 f.write("property float z\n")
                 f.write("property float intensity\n")
                 f.write("end_header\n")
-                for p in all_points_3d:
+                for p in processed_points:
                     f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {p[4]}\n")
             
             generated_files.append(stitched_path)
@@ -484,7 +662,7 @@ def run_scan(
             with open(stitched_csv_path, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(["x", "y", "z", "distance", "quality"])
-                for p in all_points_3d:
+                for p in processed_points:
                     # p = (x, y, z, distance, quality)
                     writer.writerow([f"{p[0]:.4f}", f"{p[1]:.4f}", f"{p[2]:.4f}", f"{p[3]:.4f}", int(p[4])])
 
@@ -509,11 +687,18 @@ def run_scan(
     return {
         'success': True,
         'stopped': False,
-        'point_count': len(all_points_3d),
-        'files': generated_files, # Return all slice files
+        'point_count': len(processed_points) if all_points_3d else 0,
+        'files': generated_files,
         'error': None,
         'message': "Robust scan completed successfully",
-        'scan_quality': {}
+        'scan_quality': {
+            'raw_points': len(all_points_3d),
+            'final_points': len(processed_points) if all_points_3d else 0,
+            'voxel_size_m': float(scan_config.get('voxel_size_m', 0.0)),
+            'sor_neighbors': int(scan_config.get('sor_neighbors', 0)),
+            'sor_std_ratio': float(scan_config.get('sor_std_ratio', 0.0)),
+            'sor_radius_m': float(scan_config.get('sor_radius_m', 0.0)),
+        }
     }
 
 if __name__ == "__main__":
