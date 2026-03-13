@@ -42,14 +42,11 @@ def _run_scan_3d_worker(
     stop_event,
     step_event,
     message_queue,
-    scan_type: str = "3d"
+    scan_type: str = "robust_3d"
 ):
     """Child process entrypoint for 3D scan execution."""
     try:
-        if scan_type == "robust_3d":
-            from robust_3d_scan_module import run_scan
-        else:
-            from xyzscan_servo_auto import run_scan
+        from robust_3d_scan_module import run_scan
 
         def progress_cb(progress: dict):
             try:
@@ -105,8 +102,7 @@ def _run_scan_3d_worker(
                     )
                 time.sleep(0.05)
 
-        # Build args based on function signature to support both modules
-        # (robust_3d_scan_module has file_callback, xyzscan_servo_auto might not)
+        # Build args based on function signature.
         import inspect
         sig = inspect.signature(run_scan)
         kwargs = {
@@ -336,13 +332,15 @@ class RPiScannerService(MQTTClientBase):
             if command.scan_type == "2d":
                 scan_result = self._run_scan_2d(command.port)
             elif command.scan_type in ["3d", "robust_3d"]:
-                scan_result = self._run_scan_3d(command.port, command.scan_id, command.scan_type)
+                # "3d" is retained as a compatibility alias to robust_3d.
+                normalized_scan_type = "robust_3d"
+                scan_result = self._run_scan_3d(command.port, command.scan_id, normalized_scan_type)
             else:
                 self.logger.error(f"Unsupported scan type: {command.scan_type}")
                 status = ScanStatus.create_error(
                     command.scan_id,
                     f"Unsupported scan type: {command.scan_type}",
-                    "Supported scan types are: 2d, 3d"
+                    "Supported scan types are: 2d, robust_3d"
                 )
                 self.publish(Topics.status_topic(command.scan_id), status.to_json())
                 return
@@ -488,14 +486,14 @@ class RPiScannerService(MQTTClientBase):
                 'scan_quality': {}
             }
 
-    def _run_scan_3d(self, port: str, scan_id: str, scan_type: str = "3d") -> dict:
+    def _run_scan_3d(self, port: str, scan_id: str, scan_type: str = "robust_3d") -> dict:
         """
-        Run automated 3D scan (standard or robust) in a separate process.
+        Run automated 3D scan in a separate process.
 
         Args:
             port: Serial port ("auto" or specific port like "/dev/ttyUSB0")
             scan_id: Scan identifier
-            scan_type: Type of scan ("3d" or "robust_3d")
+            scan_type: Type of scan ("robust_3d")
 
         Returns:
             dict with keys: success, point_count, files, error, message, scan_quality

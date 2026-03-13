@@ -114,7 +114,7 @@ class LaptopViewerClient(MQTTClientBase):
         Request a scan from Raspberry Pi.
         
         Args:
-            scan_type: Type of scan ("2d" or "3d")
+            scan_type: Type of scan ("2d" or "robust_3d")
             port: Serial port or "auto"
         
         Returns:

@@ -103,8 +103,8 @@ RPLidar-3D-PointCloud/
 │   ├── point_cloud_loader.py # PLY/CSV file loading
 │   └── config.py             # GUI configuration
 │
-├── dump_one_scan.py          # Core scanning script (RPi)
-├── xyzscan_servoless.py      # [DEPRECATED] 3D scanning
+├── dump_one_scan.py          # Core 2D scanning script (RPi)
+├── robust_3d_scan_module.py  # Robust 3D scanning module (RPi)
 │
 ├── utils/
 │   └── port_config.py        # Serial port detection
