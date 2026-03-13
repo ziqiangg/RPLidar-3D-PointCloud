@@ -47,7 +47,8 @@ class PointCloudLoader:
                 for row in reader:
                     x = float(row['x_m'])
                     y = float(row['y_m'])
-                    z = float(row.get('z_m', 0.0))  # Default to 0 for 2D scans
+                    # Handle both z_m (2D/3D cartesian) and z_deg (legacy format)
+                    z = float(row.get('z_m', row.get('z_deg', 0.0)))
                     points.append([x, y, z])
             
             if not points:

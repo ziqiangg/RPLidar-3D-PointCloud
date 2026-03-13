@@ -1,0 +1,55 @@
+# Raspberry Pi Scanner Service Configuration
+
+mqtt:
+  broker_host: ""  # Laptop IP address CHANGE ACCORDINGLY
+  broker_port: 1883
+  qos: 1
+  
+device:
+  role: "scanner"
+  client_id: "rplidar_scanner_rpi"
+  default_port: "/dev/ttyUSB0"  # Linux default
+  
+# scripts:
+#   scan_2d: "./dump_one_scan.py"
+  
+data:
+  output_dir: "./data"
+  formats: ["csv", "ply"]  # Generate both formats
+
+servo:
+  # Using Pico W as serial servo controller
+  serial_port: "/dev/ttyACM0"  # Default pico serial port
+  baudrate: 115200
+  timeout: 5.0
+  settle_time: 0.5             # Wait time after "DONE" before scan starts
+
+scan3d:
+  # 3D scan configuration (9 steps × 20° physical = 180° sweep)
+  sweep_start: 0
+  sweep_end: 180
+  num_steps: 35          # Total number of servo steps
+  # Delay between finishing a slice and requesting permission for next step.
+  inter_slice_sleep: 2.0  # Increased to ensure motor fully stops between slices
+  # Automatic mode: 3D scan runs fully automatically (no manual step commands needed)
+  step_permission_required: false
+  # Anti-jitter: disable PWM holding while waiting for step permission.
+  release_while_waiting: true
+  # Per-slice scan quality parameters (optimized for maximum coverage)
+  min_angle_resolution: 1.0  # 1-degree bins for finer resolution
+  min_coverage: 0.70  # Target 70% coverage (252° of 360°)
+  relaxed_max_gap: 15.0  # Maximum acceptable gap between points (degrees)
+  max_scans_to_merge: 40  # Merge up to 40 scans for dense coverage
+  plateau_patience: 10  # Wait for 10 plateau iterations before accepting
+  slice_timeout: 60.0  # 60 seconds per slice for thorough coverage
+  lidar_timeout: 3.0
+  progress_every_slices: 1
+  min_distance_mm: 50  # Filter points closer than 50mm
+  min_quality: 10  # Minimum quality threshold (0-15 scale)
+  motor_pwm: 300  # Motor speed (0-1023, default=660, lower=slower=denser scans)
+  worker_stall_timeout: 20.0
+  buffer_size: 5000
+  
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  file: "./rpi_scanner.log"

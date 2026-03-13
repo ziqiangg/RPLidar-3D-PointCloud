@@ -1,0 +1,21 @@
+# Raspberry Pi Requirements
+# Minimal dependencies for scanner service only
+
+# RPLidar communication
+rplidar-roboticia
+
+# Serial port detection
+pyserial
+
+# MQTT communication
+paho-mqtt
+
+# Configuration parsing
+pyyaml
+
+# Numerical operations
+numpy
+
+# Servo control (Raspberry Pi)
+gpiozero
+lgpio
