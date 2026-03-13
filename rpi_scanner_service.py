@@ -11,6 +11,7 @@ This service runs on the Raspberry Pi and:
 import os
 import sys
 import time
+import glob
 import threading
 import multiprocessing as mp
 import queue
@@ -171,6 +172,46 @@ class RPiScannerService(MQTTClientBase):
         self.active_process_step_event = None
         
         self.logger.info("RPi Scanner Service initialized")
+
+    def _cleanup_previous_scan_outputs(self):
+        """Remove prior scan artifacts only when a new scan is accepted."""
+        data_dir = self.config.get('data', {}).get('output_dir', './data')
+        if not data_dir:
+            data_dir = './data'
+
+        if not os.path.exists(data_dir):
+            return
+
+        patterns = [
+            # Current deterministic outputs
+            'scan.csv',
+            'scan.ply',
+            'robust_scan_full.csv',
+            'robust_scan_full.ply',
+            'robust_slice_*.ply',
+            # Legacy timestamped outputs
+            'scan_*.csv',
+            'scan_*.ply',
+            'robust_scan_full_*.csv',
+            'robust_scan_full_*.ply',
+        ]
+
+        to_remove = set()
+        for pattern in patterns:
+            for path in glob.glob(os.path.join(data_dir, pattern)):
+                if os.path.isfile(path):
+                    to_remove.add(path)
+
+        removed = 0
+        for path in sorted(to_remove):
+            try:
+                os.remove(path)
+                removed += 1
+            except Exception as e:
+                self.logger.warning(f"Failed removing previous output {path}: {e}")
+
+        if removed:
+            self.logger.info(f"Removed {removed} previous scan artifact(s) from {data_dir}")
     
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from YAML file."""
@@ -235,6 +276,9 @@ class RPiScannerService(MQTTClientBase):
                     )
                     self.publish(Topics.status_topic(command.scan_id), status.to_json())
                     return
+
+                # Retain previous outputs until a new scan is accepted, then clear.
+                self._cleanup_previous_scan_outputs()
 
                 # Mark running and start worker thread so MQTT callbacks remain responsive.
                 self.current_scan_id = command.scan_id

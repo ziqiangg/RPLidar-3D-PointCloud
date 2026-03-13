@@ -10,7 +10,7 @@ device:
   client_id: "rplidar_viewer_laptop"
   
 data:
-  receive_dir: "./data"  # Where to save received scan data
+  receive_dir: "./data"  # Transient receive folder (files are overwritten by next scan)
   auto_load: true  # Automatically load scans when received
   
 logging:

@@ -118,7 +118,7 @@ class RPLidarViewerApp:
         self.scan_type_2d_checkbox.set_on_checked(self._on_scan_type_2d_checked)
         scan_type_container.add_child(self.scan_type_2d_checkbox)
 
-        self.scan_type_robust_checkbox = gui.Checkbox("3D Scan (Robust, streamed slices)")
+        self.scan_type_robust_checkbox = gui.Checkbox("3D Scan (Robust, final aggregated files)")
         self.scan_type_robust_checkbox.checked = False
         self.scan_type_robust_checkbox.set_on_checked(self._on_scan_type_robust_checked)
         scan_type_container.add_child(self.scan_type_robust_checkbox)

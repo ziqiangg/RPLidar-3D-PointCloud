@@ -325,6 +325,7 @@ def run_scan(
     lidar = None
     all_points_3d = []
     generated_files = []
+    save_slice_files = bool(scan_config.get('save_slice_files', False))
     
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -436,34 +437,27 @@ def run_scan(
                 slice_points_3d.append(pt)
                 all_points_3d.append(pt)
             
-            # Save Slice PLY
-            timestamp = time.strftime("%H%M%S")
-            slice_filename = f"robust_slice_{i}_{timestamp}.ply"
-            slice_path = os.path.join(output_dir, slice_filename)
-            
-            with open(slice_path, 'w') as f:
-                f.write("ply\n")
-                f.write("format ascii 1.0\n")
-                f.write(f"element vertex {len(slice_points_3d)}\n")
-                f.write("property float x\n")
-                f.write("property float y\n")
-                f.write("property float z\n")
-                f.write("property float intensity\n")
-                f.write("end_header\n")
-                for p in slice_points_3d:
-                    f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {p[4]}\n")
-            
-            generated_files.append(slice_path)
-            
-            # STREAMING: Send this file immediately
-            file_callback(slice_path)
+            # Optional local-only per-slice debug artifact.
+            if save_slice_files:
+                slice_filename = f"robust_slice_{i}.ply"
+                slice_path = os.path.join(output_dir, slice_filename)
+                
+                with open(slice_path, 'w') as f:
+                    f.write("ply\n")
+                    f.write("format ascii 1.0\n")
+                    f.write(f"element vertex {len(slice_points_3d)}\n")
+                    f.write("property float x\n")
+                    f.write("property float y\n")
+                    f.write("property float z\n")
+                    f.write("property float intensity\n")
+                    f.write("end_header\n")
+                    for p in slice_points_3d:
+                        f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {p[4]}\n")
         
         # --- Automatic Stitching ---
         if all_points_3d:
-            timestamp = time.strftime("%H%M%S")
-            
             # 1. Save PLY
-            stitched_filename = f"robust_scan_full_{timestamp}.ply"
+            stitched_filename = "robust_scan_full.ply"
             stitched_path = os.path.join(output_dir, stitched_filename)
             
             progress_callback({'stage': 'saving', 'message': 'Saving stitched point cloud...'})
@@ -481,11 +475,10 @@ def run_scan(
                     f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {p[4]}\n")
             
             generated_files.append(stitched_path)
-            # Send the stitched file so the viewer can load the full model at once
             file_callback(stitched_path)
 
             # 2. Save CSV
-            stitched_csv_filename = f"robust_scan_full_{timestamp}.csv"
+            stitched_csv_filename = "robust_scan_full.csv"
             stitched_csv_path = os.path.join(output_dir, stitched_csv_filename)
 
             with open(stitched_csv_path, 'w', newline='') as f:

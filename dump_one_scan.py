@@ -253,9 +253,8 @@ def run_scan(port="auto", output_dir="data"):
 
             os.makedirs(output_dir, exist_ok=True)
 
-            ts = time.strftime("%Y%m%d_%H%M%S")
-            csv_file = os.path.join(output_dir, f"scan_{ts}.csv")
-            ply_file = os.path.join(output_dir, f"scan_{ts}.ply")
+            csv_file = os.path.join(output_dir, "scan.csv")
+            ply_file = os.path.join(output_dir, "scan.ply")
 
             with open(csv_file, "w", newline="") as f:
                 w = csv.writer(f)
