@@ -224,6 +224,7 @@ def run_scan(
     scan_config: Optional[dict] = None,
     should_stop: Optional[Callable] = None,
     progress_callback: Optional[Callable] = None,
+    wait_for_step: Optional[Callable] = None,
     file_callback: Optional[Callable] = None
 ) -> dict:
     """
@@ -236,6 +237,7 @@ def run_scan(
         scan_config: Scan settings
         should_stop: Callback to check for stop signal
         progress_callback: Callback to report progress
+        wait_for_step: (Ignored in this robust mode, usually)
         file_callback: Callback to report generated file paths (for streaming)
     """
     if should_stop is None: should_stop = lambda: False

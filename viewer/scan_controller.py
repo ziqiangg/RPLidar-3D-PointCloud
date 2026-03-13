@@ -71,7 +71,7 @@ class ScanController:
         Start a scan via MQTT command to Raspberry Pi.
         
         Args:
-            scan_type: "2d" or "robust_3d"
+            scan_type: "2d" or "3d"
             params: Optional parameters including:
                 - port: Serial port (e.g., "/dev/ttyUSB0") or "auto"
         """
@@ -149,12 +149,44 @@ class ScanController:
             print(f"[SCAN] Error stopping scan: {e}")
             self._update_status("error", f"Error stopping scan: {e}")
 
+    def step_scan(self):
+        """Allow one step in the current 3D scan."""
+        if not self.scan_running or not self.current_scan_id:
+            print("[SCAN] No scan running to step")
+            return
+
+        if self.current_scan_type != config.SCAN_TYPE_3D:
+            print("[SCAN] Step ignored: current scan is not 3D")
+            return
+
+        if not self.mqtt_client:
+            self._update_status("error", "MQTT client not available")
+            return
+
+        try:
+            print(f"[SCAN] Requesting step for scan: {self.current_scan_id}")
+            self.mqtt_client.step_scan(self.current_scan_id)
+            self._update_status("started", "Step permission sent to Raspberry Pi")
+        except Exception as e:
+            print(f"[SCAN] Error sending step: {e}")
+            self._update_status("error", f"Error sending step: {e}")
+    
     def is_running(self) -> bool:
         """Check if a scan is currently running."""
         return self.scan_running
     
     def _merge_robust_slices(self, scan_id: str):
         """Merges all slice files received for this scan into a single PLY."""
+        import glob
+        
+        # Look for slice files in data directory
+        data_dir = config.DATA_DIR
+        # Pattern matches files sent by robust_3d_scan_module
+        # Note: The filenames are like robust_slice_0_123456.ply. 
+        # But LaptopViewerClient saves them as <scan_id>_<original_name> usually? 
+        # No, LaptopViewerClient (based on typical implementation) usually saves raw file content.
+        # Let's check LaptopViewerClient later if needed. For now assuming they land in data_dir.
+        
         # Using the tracked file list from mqtt_client is safer
         files_to_merge = self.mqtt_client.received_files_by_scan.get(scan_id, [])
         if not files_to_merge:
@@ -214,12 +246,17 @@ class ScanController:
             
             if status.status == "completed":
                 # Success
-                output_file = config.SCAN_2D_PLY
-
+                output_file = config.SCAN_3D_PLY # Default
+                
                 # Determine output file based on scan type
-                if self.current_scan_type == config.SCAN_TYPE_ROBUST_3D:
+                if self.current_scan_type == config.SCAN_TYPE_3D:
+                    output_file = config.SCAN_3D_PLY
+                elif self.current_scan_type == "robust_3d":
                     self._merge_robust_slices(scan_id)
                     output_file = config.SCAN_3D_PLY
+                    # Note: Completion callback will load this file
+                else:
+                    output_file = config.SCAN_2D_PLY
                 
                 if self.completion_callback:
                     self.completion_callback(self.current_scan_type, True, output_file)

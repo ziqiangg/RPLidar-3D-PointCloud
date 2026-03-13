@@ -29,6 +29,12 @@ scan3d:
   sweep_start: 0
   sweep_end: 180
   num_steps: 35          # Total number of servo steps
+  # Delay between finishing a slice and requesting permission for next step.
+  inter_slice_sleep: 2.0  # Increased to ensure motor fully stops between slices
+  # Automatic mode: 3D scan runs fully automatically (no manual step commands needed)
+  step_permission_required: false
+  # Anti-jitter: disable PWM holding while waiting for step permission.
+  release_while_waiting: true
   # Per-slice scan quality parameters (optimized for maximum coverage)
   min_angle_resolution: 1.0  # 1-degree bins for finer resolution
   min_coverage: 0.70  # Target 70% coverage (252° of 360°)
