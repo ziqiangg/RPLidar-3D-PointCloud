@@ -55,44 +55,13 @@ class PicoServoController:
     Format: ANGLE:<angle> -> DONE:<angle>
     """
     def __init__(self, port='/dev/ttyACM0', baudrate=115200, timeout=1.0):
-        self.port = port
-        self.baudrate = baudrate
-        self.timeout = timeout
         self.ser = serial.Serial(port, baudrate, timeout=timeout)
         time.sleep(2.0) # Allow Pico to reset/initialize if needed
         try:
             self.ser.reset_input_buffer()
         except Exception:
             pass
-        # Best-effort handshake to absorb startup/re-enumeration delay.
-        self._wait_ready(max_wait=max(2.0, timeout + 2.0))
         self.current_angle = 0
-
-    def _wait_ready(self, max_wait: float = 7.0):
-        """Wait for Pico startup banner if present; continue if not seen."""
-        start = time.time()
-        while (time.time() - start) < max_wait:
-            line = self.ser.readline().decode('utf-8', errors='ignore').strip()
-            if not line:
-                continue
-            print(f"[Pico] {line}")
-            if line == "PICO_SERVO_READY":
-                return
-
-    def _reconnect(self):
-        """Reconnect serial link to recover from transient USB CDC issues."""
-        try:
-            if self.ser and self.ser.is_open:
-                self.ser.close()
-        except Exception:
-            pass
-        self.ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
-        time.sleep(2.0)
-        try:
-            self.ser.reset_input_buffer()
-        except Exception:
-            pass
-        self._wait_ready(max_wait=max(2.0, self.timeout + 2.0))
         
     def set_angle(self, angle: float):
         """
@@ -100,46 +69,35 @@ class PicoServoController:
         """
         # Ensure angle is a float and formatted correctly
         cmd = f"ANGLE:{float(angle):.2f}\n"
-
-        # First timeout can be too short right after USB reconnect/reset.
-        attempts = 2
-        for attempt in range(1, attempts + 1):
-            try:
-                # Flush input to clear any old messages
-                try:
-                    self.ser.reset_input_buffer()
-                except Exception:
-                    pass
-
-                # Send command
-                self.ser.write(cmd.encode('utf-8'))
-
-                # Wait for DONE response
-                wait_timeout = max(self.ser.timeout, 8.0) if attempt == 1 else max(self.ser.timeout, 5.0)
-                start_time = time.time()
-                while True:
-                    if time.time() - start_time > wait_timeout:
-                        raise TimeoutError(f"Timeout waiting for servo move to {angle}")
-
-                    line = self.ser.readline().decode('utf-8', errors='ignore').strip()
-                    if not line:
-                        continue
-
-                    print(f"[Pico] {line}")
-
-                    if line.startswith("DONE:"):
-                        self.current_angle = angle
-                        return
-
-                    if line.startswith("ERR:"):
-                        raise RuntimeError(f"Pico servo error: {line}")
-
-            except TimeoutError:
-                if attempt >= attempts:
-                    raise
-                print("[Pico] Servo command timeout, reconnecting serial and retrying...")
-                self._reconnect()
+        
+        # Flush input to clear any old messages
+        try:
+            self.ser.reset_input_buffer()
+        except Exception:
+            pass
+        
+        # Send command
+        self.ser.write(cmd.encode('utf-8'))
+        
+        # Wait for DONE response
+        # We expect "DONE:<angle>"
+        start_time = time.time()
+        while True:
+            if time.time() - start_time > self.ser.timeout:
+                raise TimeoutError(f"Timeout waiting for servo move to {angle}")
+                
+            line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+            if not line:
                 continue
+
+            print(f"[Pico] {line}")
+            
+            if line.startswith("DONE:"):
+                self.current_angle = angle
+                break
+
+            if line.startswith("ERR:"):
+                raise RuntimeError(f"Pico servo error: {line}")
                         
 
     def detach(self):
