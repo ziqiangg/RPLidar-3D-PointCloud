@@ -27,10 +27,8 @@ from mqtt_protocol import (
     Topics,
     ScanCommand,
     StopCommand,
-    StepCommand,
     ScanStatus,
     DataMessage,
-    MessageDecoder
 )
 
 
@@ -40,16 +38,11 @@ def _run_scan_3d_worker(
     servo_cfg: dict,
     scan3d_cfg: dict,
     stop_event,
-    step_event,
     message_queue,
-    scan_type: str = "3d"
 ):
     """Child process entrypoint for 3D scan execution."""
     try:
-        if scan_type == "robust_3d":
-            from robust_3d_scan_module import run_scan
-        else:
-            from xyzscan_servo_auto import run_scan
+        from robust_3d_scan_module import run_scan
 
         def progress_cb(progress: dict):
             try:
@@ -64,49 +57,7 @@ def _run_scan_3d_worker(
             except Exception:
                 pass
 
-        def wait_for_step(step_request: dict) -> str:
-            """Block until step command arrives or stop is requested."""
-            wait_started = time.time()
-            while True:
-                if stop_event.is_set():
-                    return "stop"
-                if step_event.is_set():
-                    try:
-                        step_event.clear()
-                    except Exception:
-                        pass
-                    return "continue"
-
-                if (time.time() - wait_started) >= 2.0:
-                    wait_started = time.time()
-                    slice_index = int(step_request.get("slice_index", 0))
-                    total_slices = int(step_request.get("total_slices", 0))
-                    next_angle = step_request.get("next_angle")
-                    next_servo_angle = step_request.get("next_servo_angle")
-                    servo_text = (
-                        f"{float(next_servo_angle):.1f}"
-                        if next_servo_angle is not None
-                        else "?"
-                    )
-                    message = (
-                        f"Awaiting step permission for slice {slice_index + 1}/{total_slices} "
-                        f"(az={next_angle}°, servo={servo_text}°). "
-                        "Press Step Scan to continue."
-                    )
-                    progress_cb(
-                        {
-                            "stage": "step_wait",
-                            "message": message,
-                            "slice_index": slice_index,
-                            "total_slices": total_slices,
-                            "next_angle": next_angle,
-                            "next_servo_angle": next_servo_angle,
-                        }
-                    )
-                time.sleep(0.05)
-
-        # Build args based on function signature to support both modules
-        # (robust_3d_scan_module has file_callback, xyzscan_servo_auto might not)
+        # Build args based on function signature.
         import inspect
         sig = inspect.signature(run_scan)
         kwargs = {
@@ -116,7 +67,6 @@ def _run_scan_3d_worker(
             'scan_config': scan3d_cfg,
             'should_stop': stop_event.is_set,
             'progress_callback': progress_cb,
-            'wait_for_step': wait_for_step,
         }
         
         if 'file_callback' in sig.parameters:
@@ -172,7 +122,6 @@ class RPiScannerService(MQTTClientBase):
         self.state_lock = threading.Lock()
         self.active_process: Optional[mp.Process] = None
         self.active_process_stop_event = None
-        self.active_process_step_event = None
         
         self.logger.info("RPi Scanner Service initialized")
     
@@ -204,7 +153,6 @@ class RPiScannerService(MQTTClientBase):
         # Subscribe to command topics
         self.subscribe(Topics.COMMAND_SCAN, self._handle_scan_command)
         self.subscribe(Topics.COMMAND_STOP, self._handle_stop_command)
-        self.subscribe(Topics.COMMAND_STEP, self._handle_step_command)
         
         self.logger.info("Ready to receive scan commands")
     
@@ -271,7 +219,6 @@ class RPiScannerService(MQTTClientBase):
                 active_scan = self.scan_running and self.current_scan_id == command.scan_id
                 active_process = self.active_process
                 active_process_stop_event = self.active_process_stop_event
-                active_process_step_event = self.active_process_step_event
 
             if active_scan:
                 self.stop_requested.set()
@@ -282,12 +229,6 @@ class RPiScannerService(MQTTClientBase):
                         self.logger.info("Signaled 3D worker process to stop")
                     except Exception as e:
                         self.logger.warning(f"Failed to signal 3D worker stop: {e}")
-                if active_process_step_event is not None:
-                    try:
-                        # Unblock worker if it is waiting for manual step permission.
-                        active_process_step_event.set()
-                    except Exception:
-                        pass
                 if active_process is not None and not active_process.is_alive():
                     self.logger.info("Active process already exited")
             else:
@@ -295,32 +236,6 @@ class RPiScannerService(MQTTClientBase):
                 
         except Exception as e:
             self.logger.error(f"Error handling stop command: {e}")
-
-    def _handle_step_command(self, topic: str, payload: bytes):
-        """Handle incoming step command for 3D scan progression."""
-        try:
-            command = StepCommand.from_json(payload.decode('utf-8'))
-            self.logger.info(f"Received step command for scan: {command.scan_id}")
-
-            with self.state_lock:
-                active_scan = (
-                    self.scan_running
-                    and self.current_scan_id == command.scan_id
-                )
-                active_process_step_event = self.active_process_step_event
-
-            if not active_scan:
-                self.logger.info("Ignoring step command: no matching active scan")
-                return
-
-            if active_process_step_event is None:
-                self.logger.info("Ignoring step command: 3D worker step gate unavailable")
-                return
-
-            active_process_step_event.set()
-            self.logger.info("Granted one 3D step")
-        except Exception as e:
-            self.logger.error(f"Error handling step command: {e}")
     
     def _execute_scan(self, command: ScanCommand):
         """Execute a scan based on command."""
@@ -335,14 +250,14 @@ class RPiScannerService(MQTTClientBase):
             # This allows us to capture results programmatically.
             if command.scan_type == "2d":
                 scan_result = self._run_scan_2d(command.port)
-            elif command.scan_type in ["3d", "robust_3d"]:
+            elif command.scan_type == "robust_3d":
                 scan_result = self._run_scan_3d(command.port, command.scan_id, command.scan_type)
             else:
                 self.logger.error(f"Unsupported scan type: {command.scan_type}")
                 status = ScanStatus.create_error(
                     command.scan_id,
                     f"Unsupported scan type: {command.scan_type}",
-                    "Supported scan types are: 2d, 3d"
+                    "Supported scan types are: 2d, robust_3d"
                 )
                 self.publish(Topics.status_topic(command.scan_id), status.to_json())
                 return
@@ -400,7 +315,6 @@ class RPiScannerService(MQTTClientBase):
                 self.scan_thread = None
                 self.active_process = None
                 self.active_process_stop_event = None
-                self.active_process_step_event = None
             self.stop_requested.clear()
     
     def _run_scan_2d(self, port: str) -> dict:
@@ -488,14 +402,14 @@ class RPiScannerService(MQTTClientBase):
                 'scan_quality': {}
             }
 
-    def _run_scan_3d(self, port: str, scan_id: str, scan_type: str = "3d") -> dict:
+    def _run_scan_3d(self, port: str, scan_id: str, scan_type: str = "robust_3d") -> dict:
         """
-        Run automated 3D scan (standard or robust) in a separate process.
+        Run automated robust 3D scan in a separate process.
 
         Args:
             port: Serial port ("auto" or specific port like "/dev/ttyUSB0")
             scan_id: Scan identifier
-            scan_type: Type of scan ("3d" or "robust_3d")
+            scan_type: Type of scan ("robust_3d")
 
         Returns:
             dict with keys: success, point_count, files, error, message, scan_quality
@@ -515,7 +429,6 @@ class RPiScannerService(MQTTClientBase):
 
             message_queue = mp.Queue()
             process_stop_event = mp.Event()
-            process_step_event = mp.Event()
             
             # Create worker process
             # Note: _run_scan_3d_worker must be imported or available in scope
@@ -527,23 +440,19 @@ class RPiScannerService(MQTTClientBase):
                     servo_cfg, 
                     scan3d_cfg, 
                     process_stop_event, 
-                    process_step_event, 
                     message_queue,
-                    scan_type 
                 )
             )
             
             with self.state_lock:
                 self.active_process = worker
                 self.active_process_stop_event = process_stop_event
-                self.active_process_step_event = process_step_event
             
             worker.start()
 
             stop_grace_deadline = None
             result = None
             last_progress_at = time.time()
-            last_progress_stage = ""
             worker_stall_timeout = max(
                 10.0,
                 float(scan3d_cfg.get('worker_stall_timeout', 20.0))
@@ -554,7 +463,6 @@ class RPiScannerService(MQTTClientBase):
                 if self.stop_requested.is_set():
                     if stop_grace_deadline is None:
                         process_stop_event.set()
-                        process_step_event.set()
                         stop_grace_deadline = time.time() + 5.0
                         self.logger.info(f"Waiting for {scan_type} worker to stop gracefully")
                     elif worker.is_alive() and time.time() >= stop_grace_deadline:
@@ -584,9 +492,6 @@ class RPiScannerService(MQTTClientBase):
                         progress = msg.get("data", {})
                         message = progress.get('message', f"{scan_type} scan in progress")
                         point_count = progress.get('point_count')
-                        stage = str(progress.get('stage', "") or "")
-                        if stage:
-                            last_progress_stage = stage
                         # Forward progress to MQTT
                         self._publish_started_status(scan_id, message, point_count=point_count)
                         last_progress_at = time.time()
@@ -602,22 +507,15 @@ class RPiScannerService(MQTTClientBase):
                     and not self.stop_requested.is_set()
                     and (time.time() - last_progress_at) > 8.0
                 ):
-                    if last_progress_stage == "step_wait":
-                        self._publish_started_status(
-                            scan_id,
-                            "Awaiting step permission from controller...",
-                        )
-                    else:
-                        self._publish_started_status(
-                            scan_id,
-                            "Waiting for LiDAR data in current slice...",
-                        )
+                    self._publish_started_status(
+                        scan_id,
+                        "Waiting for LiDAR data in current slice...",
+                    )
                     last_progress_at = time.time()
 
                 if (
                     worker.is_alive()
                     and not self.stop_requested.is_set()
-                    and last_progress_stage != "step_wait"
                     and (time.time() - last_progress_at) > worker_stall_timeout
                 ):
                     self.logger.error(
@@ -695,7 +593,6 @@ class RPiScannerService(MQTTClientBase):
             with self.state_lock:
                 self.active_process = None
                 self.active_process_stop_event = None
-                self.active_process_step_event = None
     
     def _count_csv_points(self, csv_file: str) -> int:
         """Count number of points in CSV file."""

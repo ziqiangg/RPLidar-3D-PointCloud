@@ -117,7 +117,7 @@ class PointCloudLoader:
         Load the appropriate scan file based on type.
         
         Args:
-            scan_type: "2d" or "3d"
+            scan_type: "2d" or "robust_3d"
             file_format: "csv" or "ply"
             
         Returns:
@@ -127,7 +127,7 @@ class PointCloudLoader:
         
         if scan_type == "2d":
             file_path = config.SCAN_2D_PLY if file_format == "ply" else config.SCAN_2D_CSV
-        elif scan_type == "3d":
+        elif scan_type == config.SCAN_TYPE_ROBUST_3D:
             file_path = config.SCAN_3D_PLY if file_format == "ply" else config.SCAN_3D_CSV
         else:
             print(f"Unknown scan type: {scan_type}")

@@ -10,7 +10,6 @@ from .topics import Topics
 from .messages import (
     ScanCommand,
     StopCommand,
-    StepCommand,
     ScanStatus,
     DataMessage,
     StatusType,
@@ -22,7 +21,6 @@ __all__ = [
     'Topics',
     'ScanCommand',
     'StopCommand',
-    'StepCommand',
     'ScanStatus',
     'DataMessage',
     'StatusType',

@@ -12,7 +12,6 @@ class Topics:
     rplidar/
     ├── commands/scan      # Laptop → RPi: Start scan request
     ├── commands/stop      # Laptop → RPi: Stop scan request
-    ├── commands/step      # Laptop → RPi: Allow one 3D step
     ├── status/<scan_id>   # RPi → Laptop: Final scan status
     └── data/<scan_id>     # RPi → Laptop: Point cloud data chunks
     """
@@ -23,7 +22,6 @@ class Topics:
     # Command topics (Laptop → Raspberry Pi)
     COMMAND_SCAN = f"{BASE}/commands/scan"
     COMMAND_STOP = f"{BASE}/commands/stop"
-    COMMAND_STEP = f"{BASE}/commands/step"
     
     # Status topics (Raspberry Pi → Laptop)
     STATUS_PREFIX = f"{BASE}/status"
