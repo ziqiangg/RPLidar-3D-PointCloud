@@ -50,16 +50,6 @@ def _run_scan_3d_worker(
             except Exception:
                 pass
 
-        def file_cb(file_path: str):
-            """Callback when a slice file is ready to be sent."""
-            try:
-                message_queue.put({"type": "file", "path": file_path}, timeout=0.5)
-            except Exception:
-                pass
-
-        # Build args based on function signature.
-        import inspect
-        sig = inspect.signature(run_scan)
         kwargs = {
             'port': port,
             'output_dir': output_dir,
@@ -68,9 +58,6 @@ def _run_scan_3d_worker(
             'should_stop': stop_event.is_set,
             'progress_callback': progress_cb,
         }
-        
-        if 'file_callback' in sig.parameters:
-            kwargs['file_callback'] = file_cb
 
         result = run_scan(**kwargs)
 

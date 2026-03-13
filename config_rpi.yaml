@@ -43,6 +43,12 @@ scan3d:
   motor_pwm: 300  # Motor speed (0-1023, default=660, lower=slower=denser scans)
   worker_stall_timeout: 20.0
   buffer_size: 5000
+  # Final cloud processing on RP5 before MQTT transfer
+  save_slice_files: false   # Keep per-slice debug PLY files locally if true
+  sor_neighbors: 12         # Statistical outlier filtering neighborhood size
+  sor_std_ratio: 1.0        # Larger keeps more points; smaller removes more outliers
+  sor_radius_m: 0.08        # Local neighborhood radius in meters for SOR
+  voxel_size_m: 0.01        # Voxel grid size in meters for downsampling
   
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR

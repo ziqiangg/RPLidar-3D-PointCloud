@@ -30,6 +30,8 @@ class ScanController:
         self.completion_callback: Optional[Callable] = None
         self.current_scan_type: Optional[str] = None
         self.current_scan_id: Optional[str] = None
+        self._pending_success_completion = False
+        self._received_files_by_scan = {}
         
         # Initialize MQTT client
         try:
@@ -102,6 +104,7 @@ class ScanController:
         try:
             self.current_scan_type = scan_type
             self.scan_running = True
+            self._pending_success_completion = False
             
             self.current_scan_id = self.mqtt_client.request_scan(
                 scan_type=scan_type,
@@ -153,42 +156,40 @@ class ScanController:
         """Check if a scan is currently running."""
         return self.scan_running
     
-    def _merge_robust_slices(self, scan_id: str):
-        """Merges all slice files received for this scan into a single PLY."""
-        # Using the tracked file list from mqtt_client is safer
-        files_to_merge = self.mqtt_client.received_files_by_scan.get(scan_id, [])
-        if not files_to_merge:
-            print("[SCAN] No files found to merge for robust scan")
+    def _pick_output_file(self, file_paths: list) -> str:
+        """Pick the best output file path to report for this scan."""
+        if not file_paths:
+            return ""
+
+        # Prefer PLY for viewer UX, then CSV fallback.
+        ply_files = [p for p in file_paths if p.lower().endswith(".ply")]
+        csv_files = [p for p in file_paths if p.lower().endswith(".csv")]
+        if ply_files:
+            return ply_files[0]
+        if csv_files:
+            return csv_files[0]
+        return file_paths[0]
+
+    def _finalize_success_if_ready(self, scan_id: str):
+        """Complete a successful scan only after files are received."""
+        if not self._pending_success_completion:
             return
 
-        print(f"[SCAN] Merging {len(files_to_merge)} slice files...")
-        
-        merged_points = []
-        
-        for file_path in files_to_merge:
-            if not file_path.endswith(".ply"): continue
-            
-            try:
-                with open(file_path, 'r') as f:
-                    header_ended = False
-                    for line in f:
-                        if "end_header" in line:
-                            header_ended = True
-                            continue
-                        if header_ended:
-                            merged_points.append(line)
-            except Exception as e:
-                print(f"[SCAN] Error reading slice file {file_path}: {e}")
-        
-        # Write merged file
-        output_file = config.SCAN_3D_PLY
-        try:
-            with open(output_file, 'w') as f:
-                f.write(f"ply\nformat ascii 1.0\nelement vertex {len(merged_points)}\nproperty float x\nproperty float y\nproperty float z\nproperty float intensity\nend_header\n")
-                f.writelines(merged_points)
-            print(f"[SCAN] Merged robust scan saved to {output_file}")
-        except Exception as e:
-            print(f"[SCAN] Error saving merged PLY: {e}")
+        if scan_id != self.current_scan_id:
+            return
+
+        file_paths = self._received_files_by_scan.get(scan_id, [])
+        if not file_paths:
+            return
+
+        output_file = self._pick_output_file(file_paths)
+        if self.completion_callback:
+            self.completion_callback(self.current_scan_type, True, output_file)
+
+        self.scan_running = False
+        self._pending_success_completion = False
+        self.current_scan_id = None
+        self.current_scan_type = None
 
     def _on_mqtt_status(self, scan_id: str, status: ScanStatus):
         """
@@ -210,26 +211,19 @@ class ScanController:
         
         # Handle completion
         if status.status in ["completed", "error", "stopped"]:
-            self.scan_running = False
-            
             if status.status == "completed":
-                # Success
-                output_file = config.SCAN_2D_PLY
-
-                # Determine output file based on scan type
-                if self.current_scan_type == config.SCAN_TYPE_ROBUST_3D:
-                    self._merge_robust_slices(scan_id)
-                    output_file = config.SCAN_3D_PLY
-                
-                if self.completion_callback:
-                    self.completion_callback(self.current_scan_type, True, output_file)
+                # Success is finalized when file transfer completes.
+                self._pending_success_completion = True
+                self._finalize_success_if_ready(scan_id)
             else:
                 # Error or stopped
                 if self.completion_callback:
                     self.completion_callback(self.current_scan_type, False, "")
-            
-            self.current_scan_id = None
-            self.current_scan_type = None
+
+                self.scan_running = False
+                self._pending_success_completion = False
+                self.current_scan_id = None
+                self.current_scan_type = None
     
     def _on_mqtt_data(self, scan_id: str, file_paths: list):
         """
@@ -242,6 +236,9 @@ class ScanController:
         print(f"[SCAN] Data received for {scan_id}:")
         for path in file_paths:
             print(f"  - {path}")
+
+        self._received_files_by_scan[scan_id] = list(file_paths)
+        self._finalize_success_if_ready(scan_id)
         
         # Files are automatically saved by the MQTT client
         # GUI can now load them
