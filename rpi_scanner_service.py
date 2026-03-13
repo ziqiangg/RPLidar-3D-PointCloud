@@ -112,10 +112,8 @@ def _run_scan_3d_worker(
             'scan_config': scan3d_cfg,
             'should_stop': stop_event.is_set,
             'progress_callback': progress_cb,
+            'wait_for_step': wait_for_step,
         }
-
-        if 'wait_for_step' in sig.parameters:
-            kwargs['wait_for_step'] = wait_for_step
         
         if 'file_callback' in sig.parameters:
             kwargs['file_callback'] = file_cb
