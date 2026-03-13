@@ -118,6 +118,11 @@ class RPLidarViewerApp:
         self.scan_type_2d_checkbox.set_on_checked(self._on_scan_type_2d_checked)
         scan_type_container.add_child(self.scan_type_2d_checkbox)
 
+        self.scan_type_3d_checkbox = gui.Checkbox("3D Scan (servo 0° -> 180°)")
+        self.scan_type_3d_checkbox.checked = False
+        self.scan_type_3d_checkbox.set_on_checked(self._on_scan_type_3d_checked)
+        scan_type_container.add_child(self.scan_type_3d_checkbox)
+
         self.scan_type_robust_checkbox = gui.Checkbox("Robust 3D Scan (Streamed slices)")
         self.scan_type_robust_checkbox.checked = False
         self.scan_type_robust_checkbox.set_on_checked(self._on_scan_type_robust_checked)
@@ -282,8 +287,10 @@ class RPLidarViewerApp:
             return
         
         # Determine selected scan type
-        if self.scan_type_robust_checkbox.checked:
+        if hasattr(self, 'scan_type_robust_checkbox') and self.scan_type_robust_checkbox.checked:
             scan_type = config.SCAN_TYPE_ROBUST_3D
+        elif self.scan_type_3d_checkbox.checked:
+            scan_type = config.SCAN_TYPE_3D
         else:
             scan_type = config.SCAN_TYPE_2D
         print(f"[DEBUG] Selected scan type: {scan_type}")
@@ -312,15 +319,25 @@ class RPLidarViewerApp:
     def _on_scan_type_2d_checked(self, checked: bool):
         """Keep scan type selection mutually exclusive."""
         if checked:
+            self.scan_type_3d_checkbox.checked = False
             self.scan_type_robust_checkbox.checked = False
-        elif not self.scan_type_robust_checkbox.checked:
+        elif not self.scan_type_3d_checkbox.checked and not self.scan_type_robust_checkbox.checked:
+            self.scan_type_2d_checkbox.checked = True
+
+    def _on_scan_type_3d_checked(self, checked: bool):
+        """Keep scan type selection mutually exclusive."""
+        if checked:
+            self.scan_type_2d_checkbox.checked = False
+            self.scan_type_robust_checkbox.checked = False
+        elif not self.scan_type_2d_checkbox.checked and not self.scan_type_robust_checkbox.checked:
             self.scan_type_2d_checkbox.checked = True
 
     def _on_scan_type_robust_checked(self, checked: bool):
         """Keep scan type selection mutually exclusive."""
         if checked:
             self.scan_type_2d_checkbox.checked = False
-        elif not self.scan_type_2d_checkbox.checked:
+            self.scan_type_3d_checkbox.checked = False
+        elif not self.scan_type_2d_checkbox.checked and not self.scan_type_3d_checkbox.checked:
             self.scan_type_2d_checkbox.checked = True
     
     def _on_stop_scan(self):

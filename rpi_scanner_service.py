@@ -42,11 +42,14 @@ def _run_scan_3d_worker(
     stop_event,
     step_event,
     message_queue,
-    scan_type: str = "robust_3d"
+    scan_type: str = "3d"
 ):
     """Child process entrypoint for 3D scan execution."""
     try:
-        from robust_3d_scan_module import run_scan
+        if scan_type == "robust_3d":
+            from robust_3d_scan_module import run_scan
+        else:
+            from xyzscan_servo_auto import run_scan
 
         def progress_cb(progress: dict):
             try:
@@ -102,7 +105,8 @@ def _run_scan_3d_worker(
                     )
                 time.sleep(0.05)
 
-        # Build args for robust_3d_scan_module.run_scan
+        # Build args based on function signature to support both modules
+        # (robust_3d_scan_module has file_callback, xyzscan_servo_auto might not)
         import inspect
         sig = inspect.signature(run_scan)
         kwargs = {
@@ -331,14 +335,14 @@ class RPiScannerService(MQTTClientBase):
             # This allows us to capture results programmatically.
             if command.scan_type == "2d":
                 scan_result = self._run_scan_2d(command.port)
-            elif command.scan_type == "robust_3d":
+            elif command.scan_type in ["3d", "robust_3d"]:
                 scan_result = self._run_scan_3d(command.port, command.scan_id, command.scan_type)
             else:
                 self.logger.error(f"Unsupported scan type: {command.scan_type}")
                 status = ScanStatus.create_error(
                     command.scan_id,
                     f"Unsupported scan type: {command.scan_type}",
-                    "Supported scan types are: 2d, robust_3d"
+                    "Supported scan types are: 2d, 3d"
                 )
                 self.publish(Topics.status_topic(command.scan_id), status.to_json())
                 return
