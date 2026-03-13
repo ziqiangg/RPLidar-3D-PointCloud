@@ -15,6 +15,7 @@ from typing import List, Tuple, Optional, Callable
 import numpy as np
 import serial
 from rplidar import RPLidar
+from utils.port_config import get_default_port
 
 # ==============================================================================
 # DEFAULT CONFIGURATION
@@ -39,6 +40,44 @@ DEFAULTS = {
     'min_dist': 150,
     'max_dist': 12000,
 }
+
+
+def _is_io_error(exc: Exception) -> bool:
+    """Return True for common serial I/O failures (Errno 5)."""
+    text = str(exc)
+    return isinstance(exc, OSError) or "Errno 5" in text or "Input/output error" in text
+
+
+def _safe_lidar_teardown(lidar: Optional[RPLidar]):
+    """Best-effort lidar shutdown; never raises."""
+    if not lidar:
+        return
+    try:
+        lidar.stop()
+    except Exception:
+        pass
+    try:
+        lidar.stop_motor()
+    except Exception:
+        pass
+    try:
+        lidar.disconnect()
+    except Exception:
+        pass
+
+
+def _init_lidar(lidar_port: str, baudrate: int, motor_pwm: int, spinup_s: float = 3.0) -> RPLidar:
+    """Initialize lidar and set motor speed."""
+    lidar = RPLidar(lidar_port, baudrate=baudrate)
+    try:
+        lidar.stop_motor()
+    except Exception:
+        pass
+    time.sleep(0.5)
+    lidar.start_motor()
+    lidar.motor_speed = motor_pwm
+    time.sleep(spinup_s)
+    return lidar
 
 # ==============================================================================
 # HARDWARE CLASSES
@@ -107,12 +146,12 @@ def _bin_index(angle, bin_deg):
     """Convert angle to bin index."""
     return int((angle % 360.0) / bin_deg)
 
-def capture_robust_slice(lidar: RPLidar, slice_name: str, config: dict) -> List[Tuple[float, float, float]]:
+def capture_robust_slice(lidar: RPLidar, slice_name: str, config: dict) -> Tuple[List[Tuple[float, float, float]], bool]:
     """
     Captures a single 360-degree slice using robust median filtering.
     Stops when coverage plateaus (stabilizes) or max scans reached.
     
-    Returns: List of (quality, angle, distance)
+    Returns: (List of (quality, angle, distance), had_io_error)
     """
     print(f"  > Starting capture for {slice_name}...")
     
@@ -133,6 +172,7 @@ def capture_robust_slice(lidar: RPLidar, slice_name: str, config: dict) -> List[
     history_coverage = []
     
     scan_count = 0
+    had_io_error = False
     
     # Clear any stale buffer
     try:
@@ -144,7 +184,7 @@ def capture_robust_slice(lidar: RPLidar, slice_name: str, config: dict) -> List[
         pass
 
     try:
-        for i, scan in enumerate(lidar.iter_scans(max_buf_meas=5000)):
+        for i, scan in enumerate(lidar.iter_scans(max_buf_meas=3000)):
             scan_count += 1
             
             # Process current scan
@@ -196,6 +236,7 @@ def capture_robust_slice(lidar: RPLidar, slice_name: str, config: dict) -> List[
                 break
                 
     except Exception as e:
+        had_io_error = _is_io_error(e)
         print(f"Error during slice capture: {e}")
 
     # Compute Median Scan
@@ -211,7 +252,7 @@ def capture_robust_slice(lidar: RPLidar, slice_name: str, config: dict) -> List[
         merged_points.append((final_qual, final_ang, final_dist))
     
     print(f"  > Slice complete. {len(merged_points)} valid points.")
-    return merged_points
+    return merged_points, had_io_error
 
 # ==============================================================================
 # MAIN 3D SCAN ROUTINE (Wrapped for MQTT)
@@ -248,7 +289,7 @@ def run_scan(
     if scan_config is None: scan_config = {}
     
     # Resolve parameters
-    lidar_port = port if port != "auto" else DEFAULTS['lidar_port']
+    lidar_port = port if port != "auto" else get_default_port()
     
     # New Serial Servo Config
     servo_port = servo_config.get('serial_port', DEFAULTS['servo_serial_port'])
@@ -258,6 +299,10 @@ def run_scan(
     servo_baud = int(servo_config.get('baudrate', DEFAULTS['servo_baudrate']))
     servo_timeout = float(servo_config.get('timeout', DEFAULTS['servo_timeout']))
     servo_settle = float(servo_config.get('settle_time', DEFAULTS['servo_settle_time']))
+    base_io_retries = int(scan_config.get('slice_io_retries', 1))
+    first_slice_extra_retries = int(scan_config.get('first_slice_extra_io_retries', 1))
+    reinit_spinup_s = float(scan_config.get('io_reinit_spinup_s', 2.0))
+    motor_pwm = int(scan_config.get('motor_pwm', DEFAULTS['lidar_pwm']))
 
     # Use scan_config if available, else DEFAULTS
     sweep_start = float(scan_config.get('sweep_start', DEFAULTS['sweep_start']))
@@ -292,13 +337,12 @@ def run_scan(
         servo = PicoServoController(servo_port, baudrate=servo_baud, timeout=servo_timeout)
         
         # 2. Setup Lidar
-        lidar = RPLidar(lidar_port, baudrate=DEFAULTS['lidar_baudrate'])
-        lidar.stop_motor()
-        time.sleep(0.5)
-        lidar.start_motor()
-        lidar.motor_speed = DEFAULTS['lidar_pwm']
-        
-        time.sleep(3) # Spin up
+        lidar = _init_lidar(
+            lidar_port=lidar_port,
+            baudrate=DEFAULTS['lidar_baudrate'],
+            motor_pwm=motor_pwm,
+            spinup_s=3.0,
+        )
         
         steps = np.linspace(sweep_start, sweep_end, num_steps)
         
@@ -332,8 +376,39 @@ def run_scan(
             except Exception as e:
                 print(f"Lidar reset warning: {e}")
             
-            # Capture Slice
-            slice_points_2d = capture_robust_slice(lidar, f"Slice_{i}", capture_config)
+            # Capture slice with retry/reinit on serial I/O faults.
+            retry_budget = base_io_retries + (first_slice_extra_retries if i == 0 else 0)
+            attempt = 0
+            slice_points_2d = []
+            while True:
+                slice_points_2d, had_io_error = capture_robust_slice(lidar, f"Slice_{i}", capture_config)
+
+                if not had_io_error:
+                    break
+
+                if attempt >= retry_budget:
+                    raise RuntimeError(
+                        f"LiDAR I/O error persisted in slice {i + 1} after {attempt} retries"
+                    )
+
+                attempt += 1
+                progress_callback({
+                    'stage': 'recovering',
+                    'message': (
+                        f'LiDAR I/O error during slice {i + 1}; '
+                        f'reinitializing and retrying ({attempt}/{retry_budget})...'
+                    ),
+                    'slice_index': i,
+                    'total_slices': len(steps)
+                })
+
+                _safe_lidar_teardown(lidar)
+                lidar = _init_lidar(
+                    lidar_port=lidar_port,
+                    baudrate=DEFAULTS['lidar_baudrate'],
+                    motor_pwm=motor_pwm,
+                    spinup_s=reinit_spinup_s,
+                )
             
             # Process to 3D and Save Slice
             slice_points_3d = []
@@ -434,10 +509,7 @@ def run_scan(
             'scan_quality': {}
         }
     finally:
-        if lidar:
-            lidar.stop()
-            lidar.stop_motor()
-            lidar.disconnect()
+        _safe_lidar_teardown(lidar)
         if servo:
             servo.detach()
             
