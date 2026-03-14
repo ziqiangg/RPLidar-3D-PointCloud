@@ -745,7 +745,7 @@ class RPiScannerService(MQTTClientBase):
     def _run_panorama_servo(self, scan_id: str) -> dict:
         """Phase-1 panorama mode: servo-only sweep (no camera capture yet)."""
         try:
-            from robust_3d_scan_module import PicoServoController
+            from robust_3d_scan_module import PicoServoController, _is_io_error
 
             servo_cfg = self.config.get('servo', {})
             pano_cfg = self.config.get('panorama', {})
@@ -761,9 +761,14 @@ class RPiScannerService(MQTTClientBase):
             end_deg = float(pano_cfg.get('end_deg', 180.0))
             step_deg = float(pano_cfg.get('step_deg', 30.0))
             dynamic_settle = bool(pano_cfg.get('dynamic_settle', True))
+            settle_scale = float(pano_cfg.get('settle_scale', 1.4))
             min_settle_s = float(pano_cfg.get('min_settle_time', base_settle_s))
-            max_settle_s = float(pano_cfg.get('max_settle_time', max(2.5, base_settle_s)))
-            home_settle_s = float(pano_cfg.get('home_settle_time', max(base_settle_s * 2.0, min_settle_s)))
+            max_settle_s = float(pano_cfg.get('max_settle_time', max(3.5, base_settle_s)))
+            home_settle_s = float(pano_cfg.get('home_settle_time', max(base_settle_s * 2.5, min_settle_s)))
+            step_dwell_s = float(pano_cfg.get('step_dwell_time', 0.35))
+            home_dwell_s = float(pano_cfg.get('home_dwell_time', 0.50))
+            servo_io_retries = int(pano_cfg.get('servo_io_retries', 2))
+            reconnect_delay_s = float(pano_cfg.get('servo_reconnect_delay', 0.5))
 
             robust_start = float(scan3d_cfg.get('sweep_start', 0.0))
             robust_end = float(scan3d_cfg.get('sweep_end', 180.0))
@@ -818,9 +823,12 @@ class RPiScannerService(MQTTClientBase):
 
             def _compute_settle(delta_deg: float) -> float:
                 if not dynamic_settle:
-                    return float(pano_cfg.get('settle_time', base_settle_s))
+                    settle = float(pano_cfg.get('settle_time', base_settle_s))
+                    settle = settle * max(1.0, settle_scale)
+                    return max(min_settle_s, min(max_settle_s, settle))
                 scale = abs(delta_deg) / reference_step_deg
                 settle = base_settle_s * max(1.0, scale)
+                settle = settle * max(1.0, settle_scale)
                 settle = max(min_settle_s, min(max_settle_s, settle))
                 return settle
 
@@ -832,13 +840,67 @@ class RPiScannerService(MQTTClientBase):
                     time.sleep(0.05)
                 return True
 
-            servo = PicoServoController(serial_port, baudrate=baudrate, timeout=timeout)
+            servo = None
+
+            def _connect_servo() -> PicoServoController:
+                last_exc = None
+                for attempt in range(servo_io_retries + 1):
+                    resolved_port = get_default_servo_port(servo_cfg.get('serial_port', 'auto'))
+                    try:
+                        self.logger.info(
+                            f"Connecting panorama servo on {resolved_port} "
+                            f"(attempt {attempt + 1}/{servo_io_retries + 1})"
+                        )
+                        s = PicoServoController(resolved_port, baudrate=baudrate, timeout=timeout)
+                        s.set_policy('PANORAMA')
+                        return s
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt >= servo_io_retries:
+                            break
+                        if not _sleep_with_stop(reconnect_delay_s):
+                            break
+                if last_exc:
+                    raise last_exc
+                raise RuntimeError('Failed to connect panorama servo controller')
+
+            def _move_with_recovery(target_angle: float, context: str):
+                nonlocal servo
+                for attempt in range(servo_io_retries + 1):
+                    if servo is None:
+                        servo = _connect_servo()
+
+                    try:
+                        servo.set_angle(target_angle)
+                        return
+                    except Exception as exc:
+                        is_io = _is_io_error(exc) or 'SerialException' in str(type(exc))
+                        if (not is_io) or attempt >= servo_io_retries:
+                            raise
+
+                        self._publish_started_status(
+                            scan_id,
+                            (
+                                f"Panorama recovering servo I/O during {context} "
+                                f"({attempt + 1}/{servo_io_retries})..."
+                            )
+                        )
+                        try:
+                            servo.detach()
+                        except Exception:
+                            pass
+                        servo = None
+                        if not _sleep_with_stop(reconnect_delay_s):
+                            raise RuntimeError('Stopped during panorama servo recovery')
+
+                raise RuntimeError('Panorama servo move retry budget exhausted')
+
             try:
-                servo.set_policy('PANORAMA')
+                servo = _connect_servo()
 
                 # First force known reference angle before beginning panorama sequence.
                 self._publish_started_status(scan_id, f'Panorama homing to {start_deg:.1f}°')
-                servo.set_angle(start_deg)
+                _move_with_recovery(start_deg, 'homing')
                 if not _sleep_with_stop(home_settle_s):
                     return {
                         'success': False,
@@ -847,6 +909,16 @@ class RPiScannerService(MQTTClientBase):
                         'files': [],
                         'error': None,
                         'message': 'Panorama stopped during homing settle',
+                        'scan_quality': {}
+                    }
+                if not _sleep_with_stop(home_dwell_s):
+                    return {
+                        'success': False,
+                        'stopped': True,
+                        'point_count': 0,
+                        'files': [],
+                        'error': None,
+                        'message': 'Panorama stopped during home dwell',
                         'scan_quality': {}
                     }
 
@@ -875,7 +947,7 @@ class RPiScannerService(MQTTClientBase):
                     )
 
                     if idx > 0:
-                        servo.set_angle(angle)
+                        _move_with_recovery(angle, f'step {idx + 1}')
                         if not _sleep_with_stop(settle_s):
                             return {
                                 'success': False,
@@ -886,10 +958,21 @@ class RPiScannerService(MQTTClientBase):
                                 'message': 'Panorama stopped during step settle',
                                 'scan_quality': {}
                             }
+                        if not _sleep_with_stop(step_dwell_s):
+                            return {
+                                'success': False,
+                                'stopped': True,
+                                'point_count': idx,
+                                'files': [],
+                                'error': None,
+                                'message': 'Panorama stopped during step dwell',
+                                'scan_quality': {}
+                            }
                         prev_angle = angle
             finally:
                 try:
-                    servo.detach()
+                    if servo is not None:
+                        servo.detach()
                 except Exception:
                     pass
 
@@ -906,8 +989,12 @@ class RPiScannerService(MQTTClientBase):
                     'step_deg': step_deg,
                     'steps': len(angles),
                     'dynamic_settle': dynamic_settle,
+                    'settle_scale': settle_scale,
                     'reference_step_deg': reference_step_deg,
                     'home_settle_s': home_settle_s,
+                    'step_dwell_s': step_dwell_s,
+                    'home_dwell_s': home_dwell_s,
+                    'servo_io_retries': servo_io_retries,
                 }
             }
 
