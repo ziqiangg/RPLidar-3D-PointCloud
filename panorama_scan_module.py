@@ -37,6 +37,7 @@ DEFAULTS = {
     'camera_reopen_wait': 0.5,
     'camera_probe_count': 12,
     'camera_index': 'auto',
+    'camera_allow_cap_any_fallback': False,
     'image_format': 'jpg',
     'image_quality': 90,
     'image_width': 1280,
@@ -46,7 +47,7 @@ DEFAULTS = {
 }
 
 
-def _choose_backends() -> List[Tuple[int, str]]:
+def _choose_backends(allow_cap_any_fallback: bool = True) -> List[Tuple[int, str]]:
     """Return backend candidates in platform preference order."""
     if cv2 is None:
         return []
@@ -65,10 +66,10 @@ def _choose_backends() -> List[Tuple[int, str]]:
             (getattr(cv2, 'CAP_AVFOUNDATION', any_backend), 'CAP_AVFOUNDATION'),
             (any_backend, 'CAP_ANY'),
         ]
-    return [
-        (getattr(cv2, 'CAP_V4L2', any_backend), 'CAP_V4L2'),
-        (any_backend, 'CAP_ANY'),
-    ]
+    linux_candidates = [(getattr(cv2, 'CAP_V4L2', any_backend), 'CAP_V4L2')]
+    if allow_cap_any_fallback:
+        linux_candidates.append((any_backend, 'CAP_ANY'))
+    return linux_candidates
 
 
 def _open_camera(source, backend: int):
@@ -105,7 +106,14 @@ def _build_camera_candidates(preferred_index, probe_count: int) -> List[object]:
 
     # Linux camera nodes are often non-deterministic by index; prefer stable by-id paths.
     if platform.system() == 'Linux':
-        for path in sorted(glob.glob('/dev/v4l/by-id/*')):
+        by_id_paths = sorted(glob.glob('/dev/v4l/by-id/*'))
+
+        # Prefer capture stream aliases; index1 is commonly metadata for UVC devices.
+        preferred_by_id = [p for p in by_id_paths if '-video-index0' in p]
+        secondary_by_id = [p for p in by_id_paths if p not in preferred_by_id and '-video-index1' not in p]
+        fallback_by_id = [p for p in by_id_paths if p not in preferred_by_id and p not in secondary_by_id]
+
+        for path in preferred_by_id + secondary_by_id + fallback_by_id:
             if os.path.exists(path):
                 _add_candidate(path)
 
@@ -114,6 +122,10 @@ def _build_camera_candidates(preferred_index, probe_count: int) -> List[object]:
             key=lambda p: int(p.replace('/dev/video', '')) if p.replace('/dev/video', '').isdigit() else 10**9
         )
         for path in video_nodes:
+            # Skip high-index kernel pipeline nodes (pisp/hevc) that are not camera capture.
+            suffix = path.replace('/dev/video', '')
+            if suffix.isdigit() and int(suffix) > 9:
+                continue
             if os.path.exists(path):
                 _add_candidate(path)
 
@@ -130,6 +142,7 @@ def _discover_camera(
     warmup_frames: int,
     width: int,
     height: int,
+    allow_cap_any_fallback: bool,
 ) -> Tuple[object, object, str]:
     """Discover a usable webcam source and return opened capture."""
     if cv2 is None:
@@ -137,7 +150,7 @@ def _discover_camera(
 
     camera_sources = _build_camera_candidates(preferred_index, probe_count)
 
-    backends = _choose_backends()
+    backends = _choose_backends(allow_cap_any_fallback=allow_cap_any_fallback)
     last_error = None
 
     for source in camera_sources:
@@ -179,9 +192,10 @@ def _open_preferred_camera(
     warmup_frames: int,
     width: int,
     height: int,
+    allow_cap_any_fallback: bool,
 ) -> Tuple[object, object, str]:
     """Attempt reopening only the preferred source first for faster recovery."""
-    backends = _choose_backends()
+    backends = _choose_backends(allow_cap_any_fallback=allow_cap_any_fallback)
     last_error = None
 
     for backend, backend_name in backends:
@@ -266,6 +280,9 @@ def run_scan(
     camera_reopen_wait = float(panorama_config.get('camera_reopen_wait', DEFAULTS['camera_reopen_wait']))
     camera_probe_count = int(panorama_config.get('camera_probe_count', DEFAULTS['camera_probe_count']))
     camera_index = panorama_config.get('camera_index', DEFAULTS['camera_index'])
+    camera_allow_cap_any_fallback = bool(
+        panorama_config.get('camera_allow_cap_any_fallback', DEFAULTS['camera_allow_cap_any_fallback'])
+    )
     image_fmt = str(panorama_config.get('image_format', DEFAULTS['image_format'])).strip().lower()
     if image_fmt not in ('jpg', 'jpeg', 'png'):
         image_fmt = 'jpg'
@@ -412,6 +429,7 @@ def run_scan(
                         warmup_frames=max(1, camera_warmup_frames),
                         width=max(0, image_width),
                         height=max(0, image_height),
+                        allow_cap_any_fallback=camera_allow_cap_any_fallback,
                     )
                 else:
                     raise RuntimeError('No previous camera index to reopen')
@@ -427,6 +445,7 @@ def run_scan(
                     warmup_frames=max(1, camera_warmup_frames),
                     width=max(0, image_width),
                     height=max(0, image_height),
+                    allow_cap_any_fallback=camera_allow_cap_any_fallback,
                 )
                 return cap, cam_index, cam_backend
             except Exception as exc:
@@ -464,10 +483,11 @@ def run_scan(
             warmup_frames=max(1, camera_warmup_frames),
             width=max(0, image_width),
             height=max(0, image_height),
+            allow_cap_any_fallback=camera_allow_cap_any_fallback,
         )
         progress_callback({
             'stage': 'init',
-            'message': f'Webcam ready on index {cam_index} ({cam_backend})',
+            'message': f'Webcam ready on source {cam_index} ({cam_backend})',
         })
 
         for idx, angle in enumerate(angles):
@@ -483,6 +503,10 @@ def run_scan(
                 }
 
             if idx > 0:
+                progress_callback({
+                    'stage': 'capturing',
+                    'message': f'Moving servo to {angle:.1f}\u00b0 for capture step {idx + 1}/{len(angles)}',
+                })
                 _move_with_recovery(angle)
                 moved_since_last_capture = True
                 if not _sleep_with_stop(step_settle_s):
