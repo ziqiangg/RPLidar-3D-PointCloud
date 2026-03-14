@@ -6,6 +6,8 @@ Tabbed GUI application with scan control and visualization.
 
 import os
 import sys
+import glob
+import shutil
 import subprocess
 import threading
 import tkinter as tk
@@ -60,6 +62,8 @@ class RPLidarViewerApp:
         self.panorama_status_label = None
         self.panorama_info_label = None
         self.panorama_last_output = config.PANORAMA_STITCHED_FILE
+        self.panorama_frames_by_scan = {}
+        self.panorama_stitched_scans = set()
         
         # State
         self.current_file = None
@@ -311,6 +315,10 @@ class RPLidarViewerApp:
         show_btn.set_on_clicked(self._on_panorama_show)
         actions_row.add_child(show_btn)
 
+        save_btn = gui.Button("Save Panorama...")
+        save_btn.set_on_clicked(self._on_panorama_save)
+        actions_row.add_child(save_btn)
+
         actions_row.add_stretch()
         actions_panel.add_child(actions_row)
         tab.add_child(actions_panel)
@@ -439,33 +447,40 @@ class RPLidarViewerApp:
             print(f"[INFO] Scan saved to: {file_path}")
             print(f"[INFO] Switch to Visualization tab and click 'Load File...' to view results")
 
+    def _extract_panorama_frame_index(self, file_path: str):
+        """Parse panorama frame index from names like panorama_00.jpg."""
+        base = os.path.basename(file_path).lower()
+        if not base.startswith("panorama_"):
+            return None
+        stem = base.split(".")[0]
+        idx_text = stem.replace("panorama_", "")
+        if not idx_text.isdigit():
+            return None
+        return int(idx_text)
+
     def _on_scan_data(self, scan_id: str, scan_type: str, file_paths: list):
         """Callback for completed MQTT reassembly on laptop."""
         print(f"[DEBUG] Scan data callback: id={scan_id}, type={scan_type}, files={len(file_paths)}")
         if scan_type != config.SCAN_TYPE_PANORAMA:
             return
 
-        image_paths = [
-            p for p in file_paths
-            if p.lower().endswith((".jpg", ".jpeg", ".png"))
-        ]
-        image_paths = [
-            p for p in image_paths
-            if os.path.basename(p).lower().startswith("panorama_")
-            and os.path.basename(p).split(".")[0].replace("panorama_", "").isdigit()
-        ]
+        if scan_id not in self.panorama_frames_by_scan:
+            self.panorama_frames_by_scan[scan_id] = {}
 
-        indexed = {}
-        for p in image_paths:
-            stem = os.path.basename(p).split(".")[0]
-            try:
-                idx = int(stem.replace("panorama_", ""))
-            except ValueError:
+        indexed = self.panorama_frames_by_scan[scan_id]
+        for p in file_paths:
+            if not p.lower().endswith((".jpg", ".jpeg", ".png")):
+                continue
+            idx = self._extract_panorama_frame_index(p)
+            if idx is None:
                 continue
             indexed[idx] = p
 
         expected_indices = list(range(config.PANORAMA_EXPECTED_IMAGE_COUNT))
         selected_paths = [indexed[i] for i in expected_indices if i in indexed]
+
+        if scan_id in self.panorama_stitched_scans:
+            return
 
         if len(selected_paths) < config.PANORAMA_EXPECTED_IMAGE_COUNT:
             self._update_panorama_status(
@@ -474,12 +489,12 @@ class RPLidarViewerApp:
             return
 
         self._update_panorama_status(
-            f"Received {len(image_paths)} images. Stitching panorama..."
+            f"Received {len(selected_paths)} images. Stitching panorama..."
         )
 
         worker = threading.Thread(
             target=self._stitch_panorama_from_images,
-            args=(selected_paths, False),
+            args=(selected_paths, False, scan_id),
             daemon=True,
         )
         worker.start()
@@ -487,6 +502,11 @@ class RPLidarViewerApp:
     def _on_panorama_show(self):
         """Open stitched panorama using OpenCV renderer."""
         worker = threading.Thread(target=self._show_stitched_panorama, daemon=True)
+        worker.start()
+
+    def _on_panorama_save(self):
+        """Save stitched panorama to persistent storage via file dialog."""
+        worker = threading.Thread(target=self._save_panorama_via_dialog, daemon=True)
         worker.start()
 
     def _auto_stitch_existing_images_if_ready(self):
@@ -509,9 +529,9 @@ class RPLidarViewerApp:
         self._update_panorama_status(
             f"Found existing {len(selected_paths)} panorama images. Stitching..."
         )
-        self._stitch_panorama_from_images(selected_paths, auto_show=False)
+        self._stitch_panorama_from_images(selected_paths, auto_show=False, scan_id="existing")
 
-    def _stitch_panorama_from_images(self, image_paths: list, auto_show: bool):
+    def _stitch_panorama_from_images(self, image_paths: list, auto_show: bool, scan_id: str):
         """Perform OpenCV stitch and optionally show the result."""
         ok, message, output_path = stitch_equirectangular_panorama(
             image_paths=image_paths,
@@ -521,11 +541,36 @@ class RPLidarViewerApp:
             self._update_panorama_status(f"Stitch failed: {message}")
             return
 
+        self._promote_panorama_sources(image_paths)
         self.panorama_last_output = output_path
+        self.panorama_stitched_scans.add(scan_id)
+        if scan_id in self.panorama_frames_by_scan:
+            del self.panorama_frames_by_scan[scan_id]
         self._update_panorama_status(message)
 
         if auto_show:
             self._show_stitched_panorama()
+
+    def _promote_panorama_sources(self, image_paths: list):
+        """Promote staged source captures to canonical images folder after stitch success."""
+        os.makedirs(config.PANORAMA_IMAGES_DIR, exist_ok=True)
+
+        existing = glob.glob(os.path.join(config.PANORAMA_IMAGES_DIR, "panorama_*.jpg"))
+        existing += glob.glob(os.path.join(config.PANORAMA_IMAGES_DIR, "panorama_*.jpeg"))
+        existing += glob.glob(os.path.join(config.PANORAMA_IMAGES_DIR, "panorama_*.png"))
+        for path in existing:
+            base = os.path.basename(path).lower()
+            stem = base.split(".")[0]
+            idx_text = stem.replace("panorama_", "")
+            if idx_text.isdigit():
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+
+        for src in image_paths:
+            dst = os.path.join(config.PANORAMA_IMAGES_DIR, os.path.basename(src))
+            shutil.copy2(src, dst)
 
     def _show_stitched_panorama(self):
         """Display latest stitched panorama in OpenCV window."""
@@ -534,6 +579,56 @@ class RPLidarViewerApp:
             self._update_panorama_status(message)
         else:
             self._update_panorama_status(f"OpenCV view failed: {message}")
+
+    def _save_panorama_via_dialog(self):
+        """Save stitched panorama image with a timestamped default filename."""
+        if not os.path.exists(self.panorama_last_output):
+            self._update_panorama_status("No stitched panorama to save yet")
+            return
+
+        try:
+            if not os.path.exists(config.PERSISTENT_DIR):
+                os.makedirs(config.PERSISTENT_DIR)
+
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_filename = f"panorama_{timestamp}.jpg"
+
+            selected_file = [None]
+
+            def ask_save_file():
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes('-topmost', True)
+
+                filename = filedialog.asksaveasfilename(
+                    parent=root,
+                    title="Save Stitched Panorama",
+                    initialdir=config.PERSISTENT_DIR,
+                    initialfile=default_filename,
+                    defaultextension=".jpg",
+                    filetypes=[
+                        ("JPEG files", "*.jpg"),
+                        ("PNG files", "*.png"),
+                        ("All files", "*.*")
+                    ]
+                )
+
+                root.destroy()
+                selected_file[0] = filename
+
+            dialog_thread = threading.Thread(target=ask_save_file)
+            dialog_thread.start()
+            dialog_thread.join()
+
+            filename = selected_file[0]
+            if not filename:
+                return
+
+            shutil.copy2(self.panorama_last_output, filename)
+            self._update_panorama_status(f"Saved panorama: {os.path.basename(filename)}")
+        except Exception as e:
+            self._update_panorama_status(f"Save failed: {e}")
 
     def _update_panorama_status(self, message: str):
         """Thread-safe panorama status update."""

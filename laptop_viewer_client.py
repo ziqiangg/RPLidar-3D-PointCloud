@@ -7,6 +7,7 @@ Sends scan commands and receives data/status from Raspberry Pi.
 
 import os
 import sys
+import re
 import uuid
 import yaml
 import logging
@@ -254,6 +255,11 @@ class LaptopViewerClient(MQTTClientBase):
             # Route image-like payloads into receive_dir/images by default.
             if not subdir and file_format in ('jpg', 'jpeg', 'png'):
                 subdir = 'images'
+
+            # Panorama policy: stage incoming capture frames by scan id.
+            # They are promoted to data/images only after successful stitching.
+            if file_format in ('jpg', 'jpeg', 'png') and re.match(r'^panorama_\d{2}\.(jpg|jpeg|png)$', filename, re.IGNORECASE):
+                subdir = os.path.join('images', 'incoming', scan_id)
 
             target_dir = data_dir
             if subdir:

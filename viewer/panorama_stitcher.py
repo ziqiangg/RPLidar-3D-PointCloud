@@ -68,5 +68,13 @@ def show_panorama_window(image_path: str, window_title: str = "Stitched Panorama
 
     cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)
     cv2.imshow(window_title, image)
-    cv2.waitKey(1)
+
+    # Keep window responsive until user closes it or presses a key.
+    while True:
+        key = cv2.waitKey(30) & 0xFF
+        visible = cv2.getWindowProperty(window_title, cv2.WND_PROP_VISIBLE)
+        if key != 255 or visible < 1:
+            break
+
+    cv2.destroyWindow(window_title)
     return True, f"Opened panorama window: {window_title}"

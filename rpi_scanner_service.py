@@ -306,8 +306,10 @@ class RPiScannerService(MQTTClientBase):
                     self.publish(Topics.status_topic(command.scan_id), status.to_json())
                     return
 
-                # Retain previous outputs until a new scan is accepted, then clear.
-                self._cleanup_previous_scan_outputs(command.scan_type)
+                # For panorama: preserve previous assets until a new run succeeds.
+                # For other modes: clear previous artifacts on acceptance.
+                if (command.scan_type or '').strip().lower() != 'panorama':
+                    self._cleanup_previous_scan_outputs(command.scan_type)
 
                 # Mark running and start worker thread so MQTT callbacks remain responsive.
                 self.current_scan_id = command.scan_id
