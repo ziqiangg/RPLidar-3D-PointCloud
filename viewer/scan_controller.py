@@ -293,9 +293,6 @@ class ScanController:
         scan_type = self.scan_type_by_id.get(scan_id, "")
         if self.data_callback:
             self.data_callback(scan_id, scan_type, file_paths)
-
-        # Safe to clear once reassembly callback has fired for this scan.
-        self.scan_type_by_id.pop(scan_id, None)
         
         # Files are automatically saved by the MQTT client
         # GUI can now load them
