@@ -56,7 +56,12 @@ panorama:
   start_deg: 0
   end_deg: 180
   step_deg: 30
-  settle_time: 0.5
+  # Panorama uses large angular jumps. Enable dynamic settle scaling from robust_3d reference.
+  dynamic_settle: true
+  reference_step_deg: 5.3
+  min_settle_time: 0.5
+  max_settle_time: 3.0
+  home_settle_time: 1.0
   
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR

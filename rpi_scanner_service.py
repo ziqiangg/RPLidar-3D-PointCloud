@@ -748,16 +748,33 @@ class RPiScannerService(MQTTClientBase):
 
             servo_cfg = self.config.get('servo', {})
             pano_cfg = self.config.get('panorama', {})
+            scan3d_cfg = self.config.get('scan3d', {})
 
             serial_port = servo_cfg.get('serial_port', '/dev/ttyACM0')
             baudrate = int(servo_cfg.get('baudrate', 115200))
             timeout = float(servo_cfg.get('timeout', 5.0))
-            settle_s = float(pano_cfg.get('settle_time', servo_cfg.get('settle_time', 0.5)))
+            base_settle_s = float(servo_cfg.get('settle_time', 0.5))
 
             start_deg = float(pano_cfg.get('start_deg', 0.0))
             # 6 photos in 30deg increments over 180deg span: 0,30,60,90,120,150
             end_deg = float(pano_cfg.get('end_deg', 180.0))
             step_deg = float(pano_cfg.get('step_deg', 30.0))
+            dynamic_settle = bool(pano_cfg.get('dynamic_settle', True))
+            min_settle_s = float(pano_cfg.get('min_settle_time', base_settle_s))
+            max_settle_s = float(pano_cfg.get('max_settle_time', max(2.5, base_settle_s)))
+            home_settle_s = float(pano_cfg.get('home_settle_time', max(base_settle_s * 2.0, min_settle_s)))
+
+            robust_start = float(scan3d_cfg.get('sweep_start', 0.0))
+            robust_end = float(scan3d_cfg.get('sweep_end', 180.0))
+            robust_steps = int(scan3d_cfg.get('num_steps', 35))
+            if robust_steps > 1:
+                robust_step_deg = abs(robust_end - robust_start) / float(robust_steps - 1)
+            else:
+                robust_step_deg = 5.0
+
+            reference_step_deg = float(pano_cfg.get('reference_step_deg', robust_step_deg))
+            if reference_step_deg <= 0.0:
+                reference_step_deg = 5.0
 
             if step_deg <= 0.0:
                 return {
@@ -767,6 +784,17 @@ class RPiScannerService(MQTTClientBase):
                     'files': [],
                     'error': 'Invalid panorama step size',
                     'message': 'Panorama step_deg must be > 0',
+                    'scan_quality': {}
+                }
+
+            if end_deg <= start_deg:
+                return {
+                    'success': False,
+                    'stopped': False,
+                    'point_count': 0,
+                    'files': [],
+                    'error': 'Invalid panorama range',
+                    'message': 'Panorama end_deg must be greater than start_deg',
                     'scan_quality': {}
                 }
 
@@ -787,9 +815,41 @@ class RPiScannerService(MQTTClientBase):
                     'scan_quality': {}
                 }
 
+            def _compute_settle(delta_deg: float) -> float:
+                if not dynamic_settle:
+                    return float(pano_cfg.get('settle_time', base_settle_s))
+                scale = abs(delta_deg) / reference_step_deg
+                settle = base_settle_s * max(1.0, scale)
+                settle = max(min_settle_s, min(max_settle_s, settle))
+                return settle
+
+            def _sleep_with_stop(duration_s: float) -> bool:
+                end_at = time.time() + max(0.0, duration_s)
+                while time.time() < end_at:
+                    if self.stop_requested.is_set():
+                        return False
+                    time.sleep(0.05)
+                return True
+
             servo = PicoServoController(serial_port, baudrate=baudrate, timeout=timeout)
             try:
                 servo.set_policy('PANORAMA')
+
+                # First force known reference angle before beginning panorama sequence.
+                self._publish_started_status(scan_id, f'Panorama homing to {start_deg:.1f}°')
+                servo.set_angle(start_deg)
+                if not _sleep_with_stop(home_settle_s):
+                    return {
+                        'success': False,
+                        'stopped': True,
+                        'point_count': 0,
+                        'files': [],
+                        'error': None,
+                        'message': 'Panorama stopped during homing settle',
+                        'scan_quality': {}
+                    }
+
+                prev_angle = start_deg
 
                 for idx, angle in enumerate(angles):
                     if self.stop_requested.is_set():
@@ -803,12 +863,29 @@ class RPiScannerService(MQTTClientBase):
                             'scan_quality': {}
                         }
 
+                    delta = abs(angle - prev_angle)
+                    settle_s = _compute_settle(delta)
                     self._publish_started_status(
                         scan_id,
-                        f'Panorama servo step {idx + 1}/{len(angles)} at {angle:.1f}°'
+                        (
+                            f'Panorama servo step {idx + 1}/{len(angles)} at {angle:.1f}° '
+                            f'(delta={delta:.1f}°, settle={settle_s:.2f}s)'
+                        )
                     )
-                    servo.set_angle(angle)
-                    time.sleep(settle_s)
+
+                    if idx > 0:
+                        servo.set_angle(angle)
+                        if not _sleep_with_stop(settle_s):
+                            return {
+                                'success': False,
+                                'stopped': True,
+                                'point_count': idx,
+                                'files': [],
+                                'error': None,
+                                'message': 'Panorama stopped during step settle',
+                                'scan_quality': {}
+                            }
+                        prev_angle = angle
             finally:
                 try:
                     servo.detach()
@@ -827,6 +904,9 @@ class RPiScannerService(MQTTClientBase):
                     'end_deg': end_deg,
                     'step_deg': step_deg,
                     'steps': len(angles),
+                    'dynamic_settle': dynamic_settle,
+                    'reference_step_deg': reference_step_deg,
+                    'home_settle_s': home_settle_s,
                 }
             }
 
