@@ -777,6 +777,7 @@ class RPiScannerService(MQTTClientBase):
 
             servo_cfg = self.config.get('servo', {})
             pano_cfg = self.config.get('panorama', {})
+            scan3d_cfg = self.config.get('scan3d', {})
             data_dir = self.config.get('data', {}).get('output_dir', './data')
 
             def _progress_cb(progress: dict):
@@ -788,6 +789,7 @@ class RPiScannerService(MQTTClientBase):
                 output_dir=data_dir,
                 servo_config=servo_cfg,
                 panorama_config=pano_cfg,
+                scan3d_config=scan3d_cfg,
                 should_stop=self.stop_requested.is_set,
                 progress_callback=_progress_cb,
             )

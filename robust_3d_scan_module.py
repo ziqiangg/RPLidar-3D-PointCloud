@@ -127,7 +127,11 @@ class PicoServoController:
             print(f"[Pico] {line}")
             
             if line.startswith("DONE:"):
-                self.current_angle = angle
+                try:
+                    self.current_angle = float(line.split(":", 1)[1].strip())
+                except Exception:
+                    # Fall back to requested value if firmware returns non-numeric payload.
+                    self.current_angle = float(angle)
                 break
 
             if line.startswith("ERR:"):

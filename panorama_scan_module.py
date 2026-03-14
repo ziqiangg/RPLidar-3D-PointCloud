@@ -21,8 +21,10 @@ except ImportError:
 
 DEFAULTS = {
     'start_deg': 0.0,
-    'end_deg': 180.0,
+    'end_deg': 150.0,
     'step_deg': 30.0,
+    'inherit_scan3d_sweep': True,
+    'max_panorama_deg': 150.0,
     'home_settle_time': 1.5,
     'step_settle_time': 1.0,
     'step_dwell_time': 0.35,
@@ -36,7 +38,8 @@ DEFAULTS = {
     'camera_post_move_wait': 0.20,
     'camera_reopen_retries': 2,
     'camera_reopen_wait': 0.5,
-    'camera_probe_count': 12,
+    'camera_probe_count': 4,
+    'camera_fast_reopen_only_attempts': 1,
     'camera_index': 'auto',
     'camera_allow_cap_any_fallback': False,
     'image_format': 'jpg',
@@ -45,6 +48,7 @@ DEFAULTS = {
     'image_height': 720,
     'servo_io_retries': 2,
     'servo_reconnect_delay': 0.5,
+    'servo_angle_tolerance_deg': 2.0,
 }
 
 
@@ -266,19 +270,50 @@ def _open_preferred_camera(
 
 
 def _build_angles(start_deg: float, end_deg: float, step_deg: float) -> List[float]:
-    """Build angle sequence [start, start+step, ... < end]."""
+    """Build angle sequence [start, start+step, ... <= end]."""
     angles = []
     current = start_deg
-    while current < end_deg:
+    while current <= (end_deg + 1e-6):
         angles.append(round(current, 2))
         current += step_deg
     return angles
+
+
+def _resolve_panorama_sweep(panorama_config: dict, scan3d_config: dict) -> Tuple[float, float, float]:
+    """Resolve panorama sweep while inheriting robust-3d bounds by default."""
+    pano_cfg = panorama_config or {}
+    scan_cfg = scan3d_config or {}
+
+    inherit_scan3d = bool(pano_cfg.get('inherit_scan3d_sweep', DEFAULTS['inherit_scan3d_sweep']))
+    max_panorama_deg = float(pano_cfg.get('max_panorama_deg', DEFAULTS['max_panorama_deg']))
+
+    if inherit_scan3d:
+        robust_start = float(scan_cfg.get('sweep_start', DEFAULTS['start_deg']))
+        robust_end = float(scan_cfg.get('sweep_end', 180.0))
+
+        default_start = min(robust_start, robust_end)
+        default_end = min(max_panorama_deg, max(robust_start, robust_end))
+    else:
+        default_start = DEFAULTS['start_deg']
+        default_end = min(max_panorama_deg, DEFAULTS['end_deg'])
+
+    start_deg = float(pano_cfg.get('start_deg', default_start))
+    end_deg = float(pano_cfg.get('end_deg', default_end))
+    step_deg = float(pano_cfg.get('step_deg', DEFAULTS['step_deg']))
+
+    start_deg = max(0.0, min(max_panorama_deg, start_deg))
+    end_deg = max(0.0, min(max_panorama_deg, end_deg))
+    if end_deg < start_deg:
+        end_deg = start_deg
+
+    return start_deg, end_deg, step_deg
 
 
 def run_scan(
     output_dir: str = 'data',
     servo_config: Optional[dict] = None,
     panorama_config: Optional[dict] = None,
+    scan3d_config: Optional[dict] = None,
     should_stop: Optional[Callable] = None,
     progress_callback: Optional[Callable] = None,
     file_callback: Optional[Callable] = None,
@@ -298,9 +333,9 @@ def run_scan(
     servo_config = servo_config or {}
     panorama_config = panorama_config or {}
 
-    start_deg = float(panorama_config.get('start_deg', DEFAULTS['start_deg']))
-    end_deg = float(panorama_config.get('end_deg', DEFAULTS['end_deg']))
-    step_deg = float(panorama_config.get('step_deg', DEFAULTS['step_deg']))
+    scan3d_config = scan3d_config or {}
+
+    start_deg, end_deg, step_deg = _resolve_panorama_sweep(panorama_config, scan3d_config)
     home_settle_s = float(panorama_config.get('home_settle_time', DEFAULTS['home_settle_time']))
     step_settle_s = float(panorama_config.get('step_settle_time', DEFAULTS['step_settle_time']))
     step_dwell_s = float(panorama_config.get('step_dwell_time', DEFAULTS['step_dwell_time']))
@@ -317,6 +352,9 @@ def run_scan(
     camera_post_move_wait = float(panorama_config.get('camera_post_move_wait', DEFAULTS['camera_post_move_wait']))
     camera_reopen_retries = int(panorama_config.get('camera_reopen_retries', DEFAULTS['camera_reopen_retries']))
     camera_reopen_wait = float(panorama_config.get('camera_reopen_wait', DEFAULTS['camera_reopen_wait']))
+    camera_fast_reopen_only_attempts = int(
+        panorama_config.get('camera_fast_reopen_only_attempts', DEFAULTS['camera_fast_reopen_only_attempts'])
+    )
     camera_probe_count = int(panorama_config.get('camera_probe_count', DEFAULTS['camera_probe_count']))
     camera_index = panorama_config.get('camera_index', DEFAULTS['camera_index'])
     camera_allow_cap_any_fallback = bool(
@@ -332,9 +370,11 @@ def run_scan(
 
     servo_baud = int(servo_config.get('baudrate', 115200))
     servo_timeout = float(servo_config.get('timeout', 8.0))
-    servo_port = get_default_servo_port(servo_config.get('serial_port', 'auto'))
     servo_io_retries = int(panorama_config.get('servo_io_retries', DEFAULTS['servo_io_retries']))
     servo_reconnect_delay = float(panorama_config.get('servo_reconnect_delay', DEFAULTS['servo_reconnect_delay']))
+    servo_angle_tolerance_deg = float(
+        panorama_config.get('servo_angle_tolerance_deg', DEFAULTS['servo_angle_tolerance_deg'])
+    )
 
     if step_deg <= 0:
         return {
@@ -346,13 +386,13 @@ def run_scan(
             'message': 'Invalid panorama configuration',
             'scan_quality': {}
         }
-    if end_deg <= start_deg:
+    if end_deg < start_deg:
         return {
             'success': False,
             'stopped': False,
             'point_count': 0,
             'files': [],
-            'error': 'panorama.end_deg must be > panorama.start_deg',
+            'error': 'panorama.end_deg must be >= panorama.start_deg',
             'message': 'Invalid panorama configuration',
             'scan_quality': {}
         }
@@ -409,14 +449,25 @@ def run_scan(
 
     def _move_with_recovery(target_angle: float):
         nonlocal servo
+        requested = float(target_angle)
         for attempt in range(servo_io_retries + 1):
             if servo is None:
                 servo = _connect_servo_controller()
             try:
-                servo.set_angle(target_angle)
-                return
+                servo.set_angle(requested)
+                ack = float(getattr(servo, 'current_angle', requested))
+                if abs(ack - requested) > max(0.0, servo_angle_tolerance_deg):
+                    raise RuntimeError(
+                        f'Servo ACK mismatch (requested={requested:.1f}, ack={ack:.1f})'
+                    )
+                return ack
             except Exception as exc:
-                is_io = _is_io_error(exc) or 'SerialException' in str(type(exc))
+                message = str(exc)
+                is_io = (
+                    _is_io_error(exc)
+                    or 'SerialException' in str(type(exc))
+                    or 'Servo ACK mismatch' in message
+                )
                 if (not is_io) or attempt >= servo_io_retries:
                     raise
                 try:
@@ -426,6 +477,35 @@ def run_scan(
                 servo = None
                 if not _sleep_with_stop(servo_reconnect_delay):
                     raise RuntimeError('Stopped during servo recovery')
+
+    def _prepare_capture_window(step_idx: int, total_steps: int) -> bool:
+        """Wait/flush/dwell after movement so capture uses a stable frame."""
+        if moved_since_last_capture and camera_post_move_wait > 0.0:
+            if not _sleep_with_stop(camera_post_move_wait):
+                return False
+
+        if moved_since_last_capture and camera_post_move_flush_s > 0.0:
+            progress_callback({
+                'stage': 'capturing',
+                'message': (
+                    f'Flushing camera stream for {camera_post_move_flush_s:.2f}s '
+                    f'before capture step {step_idx + 1}/{total_steps}'
+                ),
+            })
+            if not _flush_camera_stream(camera_post_move_flush_s):
+                progress_callback({
+                    'stage': 'capturing',
+                    'message': (
+                        f'Camera flush interrupted at step {step_idx + 1}; '
+                        'attempting capture recovery...'
+                    ),
+                })
+
+        if step_dwell_s > 0.0:
+            if not _sleep_with_stop(step_dwell_s):
+                return False
+
+        return True
 
     def _capture_fresh_frame() -> Tuple[bool, object]:
         """Capture a fresh frame by flushing buffered frames first."""
@@ -465,8 +545,8 @@ def run_scan(
             time.sleep(0.01)
         return True
 
-    def _recover_camera() -> Tuple[object, object, str]:
-        """Recover from camera disconnects by reopen then full rediscovery."""
+    def _recover_camera(fast_only: bool = False) -> Tuple[object, object, str]:
+        """Recover from camera disconnects with optional fast-path-only reopen."""
         nonlocal cap, cam_index, cam_backend
 
         last_exc = None
@@ -494,19 +574,20 @@ def run_scan(
             except Exception as exc:
                 last_exc = exc
 
-            try:
-                cap, cam_index, cam_backend = _discover_camera(
-                    preferred_index=cam_index if cam_index is not None else camera_index,
-                    probe_count=max(1, camera_probe_count),
-                    init_s=max(0.0, camera_init_s),
-                    warmup_frames=max(1, camera_warmup_frames),
-                    width=max(0, image_width),
-                    height=max(0, image_height),
-                    allow_cap_any_fallback=camera_allow_cap_any_fallback,
-                )
-                return cap, cam_index, cam_backend
-            except Exception as exc:
-                last_exc = exc
+            if not fast_only:
+                try:
+                    cap, cam_index, cam_backend = _discover_camera(
+                        preferred_index=cam_index if cam_index is not None else camera_index,
+                        probe_count=max(1, camera_probe_count),
+                        init_s=max(0.0, camera_init_s),
+                        warmup_frames=max(1, camera_warmup_frames),
+                        width=max(0, image_width),
+                        height=max(0, image_height),
+                        allow_cap_any_fallback=camera_allow_cap_any_fallback,
+                    )
+                    return cap, cam_index, cam_backend
+                except Exception as exc:
+                    last_exc = exc
 
             if attempt < camera_reopen_retries:
                 if not _sleep_with_stop(max(0.0, camera_reopen_wait)):
@@ -520,7 +601,14 @@ def run_scan(
         progress_callback({'stage': 'init', 'message': 'Initializing panorama servo and webcam...'})
 
         servo = _connect_servo_controller()
-        progress_callback({'stage': 'init', 'message': f'Homing servo to {start_deg:.1f}°'})
+        progress_callback({
+            'stage': 'init',
+            'message': (
+                f'Panorama sweep resolved to {start_deg:.1f}..{end_deg:.1f} deg '
+                f'in {step_deg:.1f} deg steps ({len(angles)} captures)'
+            ),
+        })
+        progress_callback({'stage': 'init', 'message': f'Homing servo to {start_deg:.1f} deg'})
         _move_with_recovery(start_deg)
         moved_since_last_capture = True
         if not _sleep_with_stop(home_settle_s):
@@ -563,7 +651,7 @@ def run_scan(
             if idx > 0:
                 progress_callback({
                     'stage': 'capturing',
-                    'message': f'Moving servo to {angle:.1f}\u00b0 for capture step {idx + 1}/{len(angles)}',
+                    'message': f'Moving servo to {angle:.1f} deg for capture step {idx + 1}/{len(angles)}',
                 })
                 _move_with_recovery(angle)
                 moved_since_last_capture = True
@@ -578,43 +666,14 @@ def run_scan(
                         'scan_quality': {}
                     }
 
-            if moved_since_last_capture and camera_post_move_wait > 0.0:
-                if not _sleep_with_stop(camera_post_move_wait):
-                    return {
-                        'success': False,
-                        'stopped': True,
-                        'point_count': len(generated_files),
-                        'files': generated_files,
-                        'error': None,
-                        'message': 'Stopped during post-move camera wait',
-                        'scan_quality': {}
-                    }
-
-            if moved_since_last_capture and camera_post_move_flush_s > 0.0:
-                progress_callback({
-                    'stage': 'capturing',
-                    'message': (
-                        f'Flushing camera stream for {camera_post_move_flush_s:.2f}s '
-                        f'before capture step {idx + 1}/{len(angles)}'
-                    ),
-                })
-                if not _flush_camera_stream(camera_post_move_flush_s):
-                    progress_callback({
-                        'stage': 'capturing',
-                        'message': (
-                            f'Camera flush interrupted at step {idx + 1}; '
-                            'attempting capture recovery...'
-                        ),
-                    })
-
-            if not _sleep_with_stop(step_dwell_s):
+            if not _prepare_capture_window(idx, len(angles)):
                 return {
                     'success': False,
                     'stopped': True,
                     'point_count': len(generated_files),
                     'files': generated_files,
                     'error': None,
-                    'message': 'Stopped during panorama dwell',
+                    'message': 'Stopped while preparing capture window',
                     'scan_quality': {}
                 }
 
@@ -631,18 +690,36 @@ def run_scan(
                         ),
                     })
                     try:
-                        _recover_camera()
-                        if moved_since_last_capture and camera_post_move_wait > 0.0:
-                            if not _sleep_with_stop(camera_post_move_wait):
-                                return {
-                                    'success': False,
-                                    'stopped': True,
-                                    'point_count': len(generated_files),
-                                    'files': generated_files,
-                                    'error': None,
-                                    'message': 'Stopped during post-recovery camera wait',
-                                    'scan_quality': {}
-                                }
+                        fast_only = recovery_attempt < max(0, camera_fast_reopen_only_attempts)
+                        _recover_camera(fast_only=fast_only)
+
+                        progress_callback({
+                            'stage': 'capturing',
+                            'message': f'Re-syncing servo to {angle:.1f} deg after camera recovery',
+                        })
+                        _move_with_recovery(angle)
+                        moved_since_last_capture = True
+                        if step_settle_s > 0.0 and not _sleep_with_stop(step_settle_s):
+                            return {
+                                'success': False,
+                                'stopped': True,
+                                'point_count': len(generated_files),
+                                'files': generated_files,
+                                'error': None,
+                                'message': 'Stopped during post-recovery servo settle',
+                                'scan_quality': {}
+                            }
+
+                        if not _prepare_capture_window(idx, len(angles)):
+                            return {
+                                'success': False,
+                                'stopped': True,
+                                'point_count': len(generated_files),
+                                'files': generated_files,
+                                'error': None,
+                                'message': 'Stopped while preparing post-recovery capture window',
+                                'scan_quality': {}
+                            }
 
                         ok, frame = _capture_fresh_frame()
                         if ok and frame is not None:
@@ -689,7 +766,7 @@ def run_scan(
             file_callback(image_path)
             progress_callback({
                 'stage': 'capturing',
-                'message': f'Captured panorama image {idx + 1}/{len(angles)} at {angle:.1f}°',
+                'message': f'Captured panorama image {idx + 1}/{len(angles)} at {angle:.1f} deg',
                 'point_count': len(generated_files),
             })
 

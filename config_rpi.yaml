@@ -53,8 +53,11 @@ scan3d:
   voxel_size_m: 0.01        # Voxel grid size in meters for downsampling
 
 panorama:
+  # Inherit robust_3d sweep bounds by default, then clamp panorama to max_panorama_deg.
+  inherit_scan3d_sweep: true
+  max_panorama_deg: 150
   start_deg: 0
-  end_deg: 180
+  end_deg: 150
   step_deg: 30
   # Servo timing profile for stable 30-degree jumps.
   home_settle_time: 1.5
@@ -63,10 +66,12 @@ panorama:
   # Servo I/O recovery controls.
   servo_io_retries: 2
   servo_reconnect_delay: 0.5
+  servo_angle_tolerance_deg: 2.0
   # Webcam discovery/capture controls.
   # Use stable capture alias (index0 is video stream, index1 is metadata for this webcam).
   camera_index: /dev/v4l/by-id/usb-046d_081b_DDCCCA90-video-index0
-  camera_probe_count: 12
+  camera_probe_count: 4
+  camera_fast_reopen_only_attempts: 1
   camera_allow_cap_any_fallback: true
   camera_init_time: 1.5
   camera_warmup_frames: 12
