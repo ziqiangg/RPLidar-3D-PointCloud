@@ -62,6 +62,7 @@ class RPLidarViewerApp:
         self.panorama_status_label = None
         self.panorama_info_label = None
         self.panorama_last_output = config.PANORAMA_STITCHED_FILE
+        self.panorama_last_sources = []
         self.panorama_frames_by_scan = {}
         self.panorama_stitched_scans = set()
         
@@ -319,6 +320,10 @@ class RPLidarViewerApp:
         save_btn.set_on_clicked(self._on_panorama_save)
         actions_row.add_child(save_btn)
 
+        save_images_btn = gui.Button("Save Images...")
+        save_images_btn.set_on_clicked(self._on_panorama_save_images)
+        actions_row.add_child(save_images_btn)
+
         actions_row.add_stretch()
         actions_panel.add_child(actions_row)
         tab.add_child(actions_panel)
@@ -509,6 +514,11 @@ class RPLidarViewerApp:
         worker = threading.Thread(target=self._save_panorama_via_dialog, daemon=True)
         worker.start()
 
+    def _on_panorama_save_images(self):
+        """Save latest individual panorama source images to a chosen folder."""
+        worker = threading.Thread(target=self._save_panorama_images_via_dialog, daemon=True)
+        worker.start()
+
     def _auto_stitch_existing_images_if_ready(self):
         """Auto-stitch if expected capture frames are already present on disk."""
         images = find_panorama_images(config.PANORAMA_IMAGES_DIR)
@@ -542,6 +552,7 @@ class RPLidarViewerApp:
             return
 
         self._promote_panorama_sources(image_paths)
+        self._prune_incoming_scan_folders()
         self.panorama_last_output = output_path
         self.panorama_stitched_scans.add(scan_id)
         if scan_id in self.panorama_frames_by_scan:
@@ -554,6 +565,19 @@ class RPLidarViewerApp:
     def _promote_panorama_sources(self, image_paths: list):
         """Promote staged source captures to canonical images folder after stitch success."""
         os.makedirs(config.PANORAMA_IMAGES_DIR, exist_ok=True)
+
+        # Remove old stitched panorama variants from previous successful runs.
+        old_stitched = glob.glob(os.path.join(config.PANORAMA_IMAGES_DIR, "panorama_stitched*.jpg"))
+        old_stitched += glob.glob(os.path.join(config.PANORAMA_IMAGES_DIR, "panorama_stitched*.jpeg"))
+        old_stitched += glob.glob(os.path.join(config.PANORAMA_IMAGES_DIR, "panorama_stitched*.png"))
+        canonical_stitched = os.path.normpath(config.PANORAMA_STITCHED_FILE)
+        for path in old_stitched:
+            if os.path.normpath(path) == canonical_stitched:
+                continue
+            try:
+                os.remove(path)
+            except Exception:
+                pass
 
         existing = glob.glob(os.path.join(config.PANORAMA_IMAGES_DIR, "panorama_*.jpg"))
         existing += glob.glob(os.path.join(config.PANORAMA_IMAGES_DIR, "panorama_*.jpeg"))
@@ -568,17 +592,38 @@ class RPLidarViewerApp:
                 except Exception:
                     pass
 
+        promoted = []
         for src in image_paths:
             dst = os.path.join(config.PANORAMA_IMAGES_DIR, os.path.basename(src))
             shutil.copy2(src, dst)
+            promoted.append(dst)
+
+        self.panorama_last_sources = promoted
+
+    def _prune_incoming_scan_folders(self):
+        """Delete staged incoming folders after successful promotion/stitch."""
+        incoming_root = config.PANORAMA_INCOMING_DIR
+        if not os.path.isdir(incoming_root):
+            return
+
+        for child in os.listdir(incoming_root):
+            child_path = os.path.join(incoming_root, child)
+            if os.path.isdir(child_path):
+                try:
+                    shutil.rmtree(child_path)
+                except Exception:
+                    pass
 
     def _show_stitched_panorama(self):
         """Display latest stitched panorama in OpenCV window."""
-        ok, message = show_panorama_window(self.panorama_last_output, "C270 Panorama")
-        if ok:
-            self._update_panorama_status(message)
-        else:
-            self._update_panorama_status(f"OpenCV view failed: {message}")
+        try:
+            ok, message = show_panorama_window(self.panorama_last_output, "C270 Panorama")
+            if ok:
+                self._update_panorama_status(message)
+            else:
+                self._update_panorama_status(f"OpenCV view failed: {message}")
+        except Exception as e:
+            self._update_panorama_status(f"OpenCV view failed: {e}")
 
     def _save_panorama_via_dialog(self):
         """Save stitched panorama image with a timestamped default filename."""
@@ -629,6 +674,48 @@ class RPLidarViewerApp:
             self._update_panorama_status(f"Saved panorama: {os.path.basename(filename)}")
         except Exception as e:
             self._update_panorama_status(f"Save failed: {e}")
+
+    def _save_panorama_images_via_dialog(self):
+        """Save latest promoted panorama source images into a chosen directory."""
+        sources = [p for p in self.panorama_last_sources if os.path.exists(p)]
+        if not sources:
+            self._update_panorama_status("No panorama source images available to save")
+            return
+
+        try:
+            selected_dir = [None]
+
+            def ask_dir():
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes('-topmost', True)
+                folder = filedialog.askdirectory(
+                    parent=root,
+                    title="Save Panorama Source Images",
+                    initialdir=config.PERSISTENT_DIR if os.path.exists(config.PERSISTENT_DIR) else config.DATA_DIR,
+                    mustexist=False,
+                )
+                root.destroy()
+                selected_dir[0] = folder
+
+            dialog_thread = threading.Thread(target=ask_dir)
+            dialog_thread.start()
+            dialog_thread.join()
+
+            target_dir = selected_dir[0]
+            if not target_dir:
+                return
+
+            os.makedirs(target_dir, exist_ok=True)
+            copied = 0
+            for src in sources:
+                dst = os.path.join(target_dir, os.path.basename(src))
+                shutil.copy2(src, dst)
+                copied += 1
+
+            self._update_panorama_status(f"Saved {copied} panorama source images")
+        except Exception as e:
+            self._update_panorama_status(f"Save images failed: {e}")
 
     def _update_panorama_status(self, message: str):
         """Thread-safe panorama status update."""

@@ -20,6 +20,7 @@ SCAN_2D_PLY = os.path.join(DATA_DIR, "scan.ply")
 SCAN_3D_CSV = os.path.join(DATA_DIR, "scan_3d.csv")
 SCAN_3D_PLY = os.path.join(DATA_DIR, "scan_3d.ply")
 PANORAMA_IMAGES_DIR = os.path.join(DATA_DIR, "images")
+PANORAMA_INCOMING_DIR = os.path.join(PANORAMA_IMAGES_DIR, "incoming")
 PANORAMA_STITCHED_FILE = os.path.join(PANORAMA_IMAGES_DIR, "panorama_stitched.jpg")
 
 # Panorama capture profile (C270 + configured sweep)
