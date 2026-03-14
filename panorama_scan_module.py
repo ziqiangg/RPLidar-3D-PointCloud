@@ -76,11 +76,42 @@ def _choose_backends(allow_cap_any_fallback: bool = True) -> List[Tuple[int, str
 def _open_camera(source, backend: int):
     """Open camera by numeric index or device path with optional backend."""
     try:
+        # Some OpenCV Linux builds cannot open V4L2 by device-name path when backend
+        # is forced explicitly; try default open path first for string sources.
+        if isinstance(source, str) and backend == getattr(cv2, 'CAP_V4L2', 200):
+            cap = cv2.VideoCapture(source)
+            if cap is not None and cap.isOpened():
+                return cap
+            if cap is not None:
+                cap.release()
+
         if backend == getattr(cv2, 'CAP_ANY', 0):
             return cv2.VideoCapture(source)
         return cv2.VideoCapture(source, backend)
     except TypeError:
         return cv2.VideoCapture(source)
+
+
+def _backends_for_source(source, allow_cap_any_fallback: bool) -> List[Tuple[int, str]]:
+    """Choose backend order based on source type and platform quirks."""
+    all_backends = _choose_backends(allow_cap_any_fallback=allow_cap_any_fallback)
+    if platform.system() != 'Linux':
+        return all_backends
+
+    # For Linux device-name paths, CAP_ANY is often more reliable than forcing CAP_V4L2.
+    if isinstance(source, str):
+        cap_any = getattr(cv2, 'CAP_ANY', 0)
+        ordered = []
+        seen = set()
+        for backend, name in [(cap_any, 'CAP_ANY')] + all_backends:
+            key = (backend, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append((backend, name))
+        return ordered
+
+    return all_backends
 
 
 def _build_camera_candidates(preferred_index, probe_count: int) -> List[object]:
@@ -117,6 +148,10 @@ def _build_camera_candidates(preferred_index, probe_count: int) -> List[object]:
         for path in preferred_by_id + secondary_by_id + fallback_by_id:
             if os.path.exists(path):
                 _add_candidate(path)
+                # Also add resolved /dev/videoN target so recovery survives udev alias quirks.
+                real_path = os.path.realpath(path)
+                if real_path and os.path.exists(real_path):
+                    _add_candidate(real_path)
 
         video_nodes = sorted(
             glob.glob('/dev/video*'),
@@ -151,10 +186,10 @@ def _discover_camera(
 
     camera_sources = _build_camera_candidates(preferred_index, probe_count)
 
-    backends = _choose_backends(allow_cap_any_fallback=allow_cap_any_fallback)
     last_error = None
 
     for source in camera_sources:
+        backends = _backends_for_source(source, allow_cap_any_fallback)
         for backend, backend_name in backends:
             cap = _open_camera(source, backend)
             if cap is None or not cap.isOpened():
@@ -196,9 +231,9 @@ def _open_preferred_camera(
     allow_cap_any_fallback: bool,
 ) -> Tuple[object, object, str]:
     """Attempt reopening only the preferred source first for faster recovery."""
-    backends = _choose_backends(allow_cap_any_fallback=allow_cap_any_fallback)
     last_error = None
 
+    backends = _backends_for_source(preferred_source, allow_cap_any_fallback)
     for backend, backend_name in backends:
         cap = _open_camera(preferred_source, backend)
         if cap is None or not cap.isOpened():

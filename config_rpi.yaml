@@ -67,7 +67,7 @@ panorama:
   # Use stable capture alias (index0 is video stream, index1 is metadata for this webcam).
   camera_index: /dev/v4l/by-id/usb-046d_081b_DDCCCA90-video-index0
   camera_probe_count: 12
-  camera_allow_cap_any_fallback: false
+  camera_allow_cap_any_fallback: true
   camera_init_time: 1.5
   camera_warmup_frames: 12
   camera_capture_retries: 2
