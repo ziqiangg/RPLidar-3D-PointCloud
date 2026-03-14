@@ -14,7 +14,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from laptop_viewer_client import LaptopViewerClient
 from mqtt_protocol import ScanStatus
 from . import config
-from .panorama_tools import stitch_panorama_from_paths
 
 
 class ScanController:
@@ -31,8 +30,6 @@ class ScanController:
         self.completion_callback: Optional[Callable] = None
         self.current_scan_type: Optional[str] = None
         self.current_scan_id: Optional[str] = None
-        self._pending_success_completion = False
-        self._received_files_by_scan = {}
         
         # Initialize MQTT client
         try:
@@ -74,7 +71,7 @@ class ScanController:
         Start a scan via MQTT command to Raspberry Pi.
         
         Args:
-            scan_type: "2d" or "robust_3d"
+            scan_type: "2d" or "3d"
             params: Optional parameters including:
                 - port: Serial port (e.g., "/dev/ttyUSB0") or "auto"
         """
@@ -105,7 +102,6 @@ class ScanController:
         try:
             self.current_scan_type = scan_type
             self.scan_running = True
-            self._pending_success_completion = False
             
             self.current_scan_id = self.mqtt_client.request_scan(
                 scan_type=scan_type,
@@ -153,87 +149,78 @@ class ScanController:
             print(f"[SCAN] Error stopping scan: {e}")
             self._update_status("error", f"Error stopping scan: {e}")
 
+    def step_scan(self):
+        """Allow one step in the current 3D scan."""
+        if not self.scan_running or not self.current_scan_id:
+            print("[SCAN] No scan running to step")
+            return
+
+        if self.current_scan_type != config.SCAN_TYPE_3D:
+            print("[SCAN] Step ignored: current scan is not 3D")
+            return
+
+        if not self.mqtt_client:
+            self._update_status("error", "MQTT client not available")
+            return
+
+        try:
+            print(f"[SCAN] Requesting step for scan: {self.current_scan_id}")
+            self.mqtt_client.step_scan(self.current_scan_id)
+            self._update_status("started", "Step permission sent to Raspberry Pi")
+        except Exception as e:
+            print(f"[SCAN] Error sending step: {e}")
+            self._update_status("error", f"Error sending step: {e}")
+    
     def is_running(self) -> bool:
         """Check if a scan is currently running."""
         return self.scan_running
     
-    def _pick_output_file(self, file_paths: list) -> str:
-        """Pick the best output file path to report for this scan."""
-        if not file_paths:
-            return ""
-
-        stitched = [
-            p for p in file_paths
-            if os.path.basename(p).lower().startswith("panorama_stitched")
-        ]
-        if stitched:
-            return stitched[0]
-
-        # Prefer PLY for viewer UX, then CSV fallback.
-        ply_files = [p for p in file_paths if p.lower().endswith(".ply")]
-        csv_files = [p for p in file_paths if p.lower().endswith(".csv")]
-        if ply_files:
-            return ply_files[0]
-        if csv_files:
-            return csv_files[0]
-        return file_paths[0]
-
-    def _stitch_panorama_images(self, scan_id: str, file_paths: list) -> str:
-        """Stitch received panorama images into a single output on laptop."""
-        image_paths = [
-            p for p in file_paths
-            if p.lower().endswith((".jpg", ".jpeg", ".png"))
-            and os.path.basename(p).lower().startswith("panorama_")
-            and "stitched" not in os.path.basename(p).lower()
-            and os.path.exists(p)
-        ]
-        image_paths.sort(key=lambda p: os.path.basename(p).lower())
-
-        if len(image_paths) < 2:
-            self._update_status("started", "Panorama stitch skipped: fewer than 2 images received")
-            return ""
-
-        self._update_status("started", f"Stitching {len(image_paths)} panorama images on laptop...")
-
-        out_dir = os.path.dirname(image_paths[0])
-        out_name = f"panorama_stitched_{scan_id[:8]}.jpg"
-        out_path = os.path.join(out_dir, out_name)
-
-        ok, msg = stitch_panorama_from_paths(image_paths, out_path)
-        if not ok:
-            self._update_status("started", f"Panorama stitch failed: {msg}")
-            return ""
-
-        self._update_status("started", f"Panorama stitched image saved: {out_path}")
-        return out_path
-
-    def _finalize_success_if_ready(self, scan_id: str):
-        """Complete a successful scan only after files are received."""
-        if not self._pending_success_completion:
+    def _merge_robust_slices(self, scan_id: str):
+        """Merges all slice files received for this scan into a single PLY."""
+        import glob
+        
+        # Look for slice files in data directory
+        data_dir = config.DATA_DIR
+        # Pattern matches files sent by robust_3d_scan_module
+        # Note: The filenames are like robust_slice_0_123456.ply. 
+        # But LaptopViewerClient saves them as <scan_id>_<original_name> usually? 
+        # No, LaptopViewerClient (based on typical implementation) usually saves raw file content.
+        # Let's check LaptopViewerClient later if needed. For now assuming they land in data_dir.
+        
+        # Using the tracked file list from mqtt_client is safer
+        files_to_merge = self.mqtt_client.received_files_by_scan.get(scan_id, [])
+        if not files_to_merge:
+            print("[SCAN] No files found to merge for robust scan")
             return
 
-        if scan_id != self.current_scan_id:
-            return
-
-        file_paths = self._received_files_by_scan.get(scan_id, [])
-        if not file_paths:
-            return
-
-        if self.current_scan_type == config.SCAN_TYPE_PANORAMA:
-            stitched_path = self._stitch_panorama_images(scan_id, file_paths)
-            if stitched_path:
-                if stitched_path not in file_paths:
-                    file_paths = list(file_paths) + [stitched_path]
-                    self._received_files_by_scan[scan_id] = file_paths
-
-        output_file = self._pick_output_file(file_paths)
-        if self.completion_callback:
-            self.completion_callback(self.current_scan_type, True, output_file)
-
-        self.scan_running = False
-        self._pending_success_completion = False
-        self.current_scan_id = None
-        self.current_scan_type = None
+        print(f"[SCAN] Merging {len(files_to_merge)} slice files...")
+        
+        merged_points = []
+        
+        for file_path in files_to_merge:
+            if not file_path.endswith(".ply"): continue
+            
+            try:
+                with open(file_path, 'r') as f:
+                    header_ended = False
+                    for line in f:
+                        if "end_header" in line:
+                            header_ended = True
+                            continue
+                        if header_ended:
+                            merged_points.append(line)
+            except Exception as e:
+                print(f"[SCAN] Error reading slice file {file_path}: {e}")
+        
+        # Write merged file
+        output_file = config.SCAN_3D_PLY
+        try:
+            with open(output_file, 'w') as f:
+                f.write(f"ply\nformat ascii 1.0\nelement vertex {len(merged_points)}\nproperty float x\nproperty float y\nproperty float z\nproperty float intensity\nend_header\n")
+                f.writelines(merged_points)
+            print(f"[SCAN] Merged robust scan saved to {output_file}")
+        except Exception as e:
+            print(f"[SCAN] Error saving merged PLY: {e}")
 
     def _on_mqtt_status(self, scan_id: str, status: ScanStatus):
         """
@@ -255,19 +242,31 @@ class ScanController:
         
         # Handle completion
         if status.status in ["completed", "error", "stopped"]:
+            self.scan_running = False
+            
             if status.status == "completed":
-                # Success is finalized when file transfer completes.
-                self._pending_success_completion = True
-                self._finalize_success_if_ready(scan_id)
+                # Success
+                output_file = config.SCAN_3D_PLY # Default
+                
+                # Determine output file based on scan type
+                if self.current_scan_type == config.SCAN_TYPE_3D:
+                    output_file = config.SCAN_3D_PLY
+                elif self.current_scan_type == "robust_3d":
+                    self._merge_robust_slices(scan_id)
+                    output_file = config.SCAN_3D_PLY
+                    # Note: Completion callback will load this file
+                else:
+                    output_file = config.SCAN_2D_PLY
+                
+                if self.completion_callback:
+                    self.completion_callback(self.current_scan_type, True, output_file)
             else:
                 # Error or stopped
                 if self.completion_callback:
                     self.completion_callback(self.current_scan_type, False, "")
-
-                self.scan_running = False
-                self._pending_success_completion = False
-                self.current_scan_id = None
-                self.current_scan_type = None
+            
+            self.current_scan_id = None
+            self.current_scan_type = None
     
     def _on_mqtt_data(self, scan_id: str, file_paths: list):
         """
@@ -280,9 +279,6 @@ class ScanController:
         print(f"[SCAN] Data received for {scan_id}:")
         for path in file_paths:
             print(f"  - {path}")
-
-        self._received_files_by_scan[scan_id] = list(file_paths)
-        self._finalize_success_if_ready(scan_id)
         
         # Files are automatically saved by the MQTT client
         # GUI can now load them
