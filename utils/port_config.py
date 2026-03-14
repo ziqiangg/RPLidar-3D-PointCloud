@@ -6,6 +6,7 @@ serial ports, helping identify the correct port for the RPLidar device.
 """
 
 import sys
+import os
 import platform
 
 def get_available_ports():
@@ -86,6 +87,66 @@ def find_rplidar_port():
     return None
 
 
+def find_pico_port():
+    """
+    Attempt to detect a Raspberry Pi Pico (or compatible USB CDC serial) port.
+
+    Returns:
+        str or None: Detected servo-controller serial port, or None if not found
+    """
+    try:
+        import serial.tools.list_ports
+        ports = serial.tools.list_ports.comports()
+        os_type = platform.system()
+
+        scored = []
+        for p in ports:
+            dev = (p.device or "")
+            desc = (p.description or "")
+            hwid = (p.hwid or "")
+            text = f"{desc} {hwid}".lower()
+
+            score = 0
+            if "pico" in text or "rp2040" in text:
+                score += 5
+            if "usb serial" in text or "cdc" in text:
+                score += 2
+
+            if os_type == "Linux" and "ttyACM" in dev:
+                score += 3
+            elif os_type == "Windows" and dev.upper().startswith("COM"):
+                score += 1
+            elif os_type == "Darwin" and ("usbmodem" in dev or "usbserial" in dev):
+                score += 1
+
+            if score > 0:
+                scored.append((score, dev))
+
+        if scored:
+            scored.sort(key=lambda x: x[0], reverse=True)
+            return scored[0][1]
+
+        # Fallback by common device naming when descriptors are unhelpful.
+        if os_type == "Linux":
+            for p in ports:
+                if "ttyACM" in (p.device or ""):
+                    return p.device
+        elif os_type == "Darwin":
+            for p in ports:
+                d = (p.device or "")
+                if "usbmodem" in d or "usbserial" in d:
+                    return d
+        elif os_type == "Windows":
+            for p in ports:
+                d = (p.device or "")
+                if d.upper().startswith("COM"):
+                    return d
+    except ImportError:
+        pass
+
+    return None
+
+
 def get_default_port():
     """
     Get the default port based on OS, or auto-detect if possible.
@@ -109,6 +170,43 @@ def get_default_port():
         return "/dev/cu.usbserial-0001"
     else:
         return "COM3"  # Generic fallback
+
+
+def get_default_servo_port(preferred: str = "auto"):
+    """
+    Resolve servo controller serial port with optional auto-detection.
+
+    If a Linux /dev path is explicitly configured but missing, this function
+    falls back to auto-detection to tolerate enumeration changes (e.g., ACM0->ACM1).
+
+    Args:
+        preferred: configured port value or "auto"
+
+    Returns:
+        str: resolved servo serial port
+    """
+    preferred = (preferred or "auto").strip()
+
+    if preferred.lower() != "auto":
+        if preferred.startswith("/dev/"):
+            if os.path.exists(preferred):
+                return preferred
+        else:
+            return preferred
+
+    detected = find_pico_port()
+    if detected:
+        return detected
+
+    os_type = platform.system()
+    if os_type == "Linux":
+        return "/dev/ttyACM0"
+    elif os_type == "Windows":
+        return "COM4"
+    elif os_type == "Darwin":
+        return "/dev/cu.usbmodem0001"
+    else:
+        return "COM4"
 
 
 def select_port_interactive():

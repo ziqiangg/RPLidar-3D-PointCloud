@@ -19,7 +19,7 @@ data:
 
 servo:
   # Using Pico W as serial servo controller
-  serial_port: "/dev/ttyACM0"  # Default pico serial port
+  serial_port: "auto"  # Auto-detect Pico serial port (recommended)
   baudrate: 115200
   timeout: 8.0               # Extra margin for first command after USB reset/reconnect
   settle_time: 0.5             # Wait time after "DONE" before scan starts

@@ -33,6 +33,7 @@ from mqtt_protocol import (
     DataMessage,
     MessageDecoder
 )
+from utils.port_config import get_default_servo_port
 
 
 def _run_scan_3d_worker(
@@ -750,7 +751,7 @@ class RPiScannerService(MQTTClientBase):
             pano_cfg = self.config.get('panorama', {})
             scan3d_cfg = self.config.get('scan3d', {})
 
-            serial_port = servo_cfg.get('serial_port', '/dev/ttyACM0')
+            serial_port = get_default_servo_port(servo_cfg.get('serial_port', 'auto'))
             baudrate = int(servo_cfg.get('baudrate', 115200))
             timeout = float(servo_cfg.get('timeout', 5.0))
             base_settle_s = float(servo_cfg.get('settle_time', 0.5))

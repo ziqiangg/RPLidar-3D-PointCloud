@@ -15,7 +15,7 @@ from typing import List, Tuple, Optional, Callable
 import numpy as np
 import serial
 from rplidar import RPLidar
-from utils.port_config import get_default_port
+from utils.port_config import get_default_port, get_default_servo_port
 
 # ==============================================================================
 # DEFAULT CONFIGURATION
@@ -457,9 +457,8 @@ def run_scan(
     lidar_port = port if port != "auto" else get_default_port()
     
     # New Serial Servo Config
-    servo_port = servo_config.get('serial_port', DEFAULTS['servo_serial_port'])
-    if servo_port == "auto" or servo_port is None: 
-        servo_port = DEFAULTS['servo_serial_port']
+    servo_port_cfg = servo_config.get('serial_port', DEFAULTS['servo_serial_port'])
+    servo_port = get_default_servo_port(servo_port_cfg)
         
     servo_baud = int(servo_config.get('baudrate', DEFAULTS['servo_baudrate']))
     servo_timeout = float(servo_config.get('timeout', DEFAULTS['servo_timeout']))
