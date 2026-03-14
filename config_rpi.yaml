@@ -51,6 +51,12 @@ scan3d:
   sor_max_points: 12000     # Automatic cutoff: skip SOR when point count exceeds this
   sor_max_runtime_s: 2.5    # Automatic cutoff: abort SOR if it exceeds this runtime
   voxel_size_m: 0.01        # Voxel grid size in meters for downsampling
+
+panorama:
+  start_deg: 0
+  end_deg: 180
+  step_deg: 30
+  settle_time: 0.5
   
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR

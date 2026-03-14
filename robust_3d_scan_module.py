@@ -132,6 +132,36 @@ class PicoServoController:
 
             if line.startswith("ERR:"):
                 raise RuntimeError(f"Pico servo error: {line}")
+
+    def set_policy(self, policy_name: str):
+        """Select active motion policy on Pico firmware."""
+        policy = str(policy_name).strip().upper()
+        if not policy:
+            raise ValueError("policy_name must be non-empty")
+
+        cmd = f"POLICY:{policy}\n"
+
+        try:
+            self.ser.reset_input_buffer()
+        except Exception:
+            pass
+
+        self.ser.write(cmd.encode('utf-8'))
+
+        start_time = time.time()
+        while True:
+            if time.time() - start_time > self.ser.timeout:
+                raise TimeoutError(f"Timeout waiting for policy ack: {policy}")
+
+            line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+            if not line:
+                continue
+
+            print(f"[Pico] {line}")
+            if line.startswith("POLICY_SET:"):
+                return
+            if line.startswith("ERR:"):
+                raise RuntimeError(f"Pico servo policy error: {line}")
                         
 
     def detach(self):
@@ -471,6 +501,7 @@ def run_scan(
         # 1. Setup Servo
         print(f"Connecting to servo on {servo_port} @ {servo_baud}...")
         servo = PicoServoController(servo_port, baudrate=servo_baud, timeout=servo_timeout)
+        servo.set_policy("ROBUST_3D")
         
         # 2. Setup Lidar
         lidar = _init_lidar(

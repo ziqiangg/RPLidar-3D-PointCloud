@@ -9,22 +9,55 @@ SERVO_PIN = 15
 MIN_US = 450
 MAX_US = 2450
 
+POLICIES = {
+    "ROBUST_3D": {
+        "min_angle": 0,
+        "max_angle": 180,
+    },
+    "PANORAMA": {
+        "min_angle": 0,
+        "max_angle": 150,
+    },
+}
+active_policy = "ROBUST_3D"
+
 # ===== Servo setup =====
 pwm = PWM(Pin(SERVO_PIN))
 pwm.freq(50)
 
 # ===== Convert angle to pulse =====
+def _clamp_to_policy(angle):
+    policy = POLICIES.get(active_policy, POLICIES["ROBUST_3D"])
+    min_a = policy["min_angle"]
+    max_a = policy["max_angle"]
+
+    if angle < min_a:
+        return min_a
+    if angle > max_a:
+        return max_a
+    return angle
+
+
 def angle_to_us(angle):
-    if angle < 0:
-        angle = 0
-    if angle > 180:
-        angle = 180
+    angle = _clamp_to_policy(angle)
 
     return int(MIN_US + (angle / 180) * (MAX_US - MIN_US))
 
 
+def set_policy(policy_name):
+    global active_policy
+    key = str(policy_name).strip().upper()
+    if key in POLICIES:
+        active_policy = key
+        print("POLICY_SET:{}".format(active_policy))
+    else:
+        print("ERR:POLICY")
+
+
 # ===== Move servo =====
 def move_servo(angle):
+
+    angle = _clamp_to_policy(angle)
 
     us = angle_to_us(angle)
 
@@ -41,6 +74,9 @@ def sweep(start, end, step, settle):
     if step <= 0:
         print("ERR:STEP")
         return
+
+    start = _clamp_to_policy(start)
+    end = _clamp_to_policy(end)
 
     angle = start
 
@@ -102,6 +138,17 @@ while True:
 
             except:
                 print("ERR:SWEEP")
+
+
+        # ----- Motion policy -----
+        elif cmd.startswith("POLICY:"):
+
+            try:
+                policy_name = cmd.split(":", 1)[1]
+                set_policy(policy_name)
+
+            except:
+                print("ERR:POLICY")
 
 
         # ----- Home -----

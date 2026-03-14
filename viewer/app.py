@@ -123,6 +123,11 @@ class RPLidarViewerApp:
         self.scan_type_robust_checkbox.set_on_checked(self._on_scan_type_robust_checked)
         scan_type_container.add_child(self.scan_type_robust_checkbox)
 
+        self.scan_type_panorama_checkbox = gui.Checkbox("Panorama (servo sweep)")
+        self.scan_type_panorama_checkbox.checked = False
+        self.scan_type_panorama_checkbox.set_on_checked(self._on_scan_type_panorama_checked)
+        scan_type_container.add_child(self.scan_type_panorama_checkbox)
+
         scan_type_panel.add_child(scan_type_container)
         tab.add_child(scan_type_panel)
         
@@ -282,7 +287,9 @@ class RPLidarViewerApp:
             return
         
         # Determine selected scan type
-        if hasattr(self, 'scan_type_robust_checkbox') and self.scan_type_robust_checkbox.checked:
+        if hasattr(self, 'scan_type_panorama_checkbox') and self.scan_type_panorama_checkbox.checked:
+            scan_type = config.SCAN_TYPE_PANORAMA
+        elif hasattr(self, 'scan_type_robust_checkbox') and self.scan_type_robust_checkbox.checked:
             scan_type = config.SCAN_TYPE_ROBUST_3D
         else:
             scan_type = config.SCAN_TYPE_2D
@@ -313,14 +320,24 @@ class RPLidarViewerApp:
         """Keep scan type selection mutually exclusive."""
         if checked:
             self.scan_type_robust_checkbox.checked = False
-        elif not self.scan_type_robust_checkbox.checked:
+            self.scan_type_panorama_checkbox.checked = False
+        elif not self.scan_type_robust_checkbox.checked and not self.scan_type_panorama_checkbox.checked:
             self.scan_type_2d_checkbox.checked = True
 
     def _on_scan_type_robust_checked(self, checked: bool):
         """Keep scan type selection mutually exclusive."""
         if checked:
             self.scan_type_2d_checkbox.checked = False
-        elif not self.scan_type_2d_checkbox.checked:
+            self.scan_type_panorama_checkbox.checked = False
+        elif not self.scan_type_2d_checkbox.checked and not self.scan_type_panorama_checkbox.checked:
+            self.scan_type_2d_checkbox.checked = True
+
+    def _on_scan_type_panorama_checked(self, checked: bool):
+        """Keep scan type selection mutually exclusive."""
+        if checked:
+            self.scan_type_2d_checkbox.checked = False
+            self.scan_type_robust_checkbox.checked = False
+        elif not self.scan_type_2d_checkbox.checked and not self.scan_type_robust_checkbox.checked:
             self.scan_type_2d_checkbox.checked = True
     
     def _on_stop_scan(self):

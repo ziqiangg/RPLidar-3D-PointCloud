@@ -379,12 +379,14 @@ class RPiScannerService(MQTTClientBase):
                 # "3d" is retained as a compatibility alias to robust_3d.
                 normalized_scan_type = "robust_3d"
                 scan_result = self._run_scan_3d(command.port, command.scan_id, normalized_scan_type)
+            elif command.scan_type == "panorama":
+                scan_result = self._run_panorama_servo(command.scan_id)
             else:
                 self.logger.error(f"Unsupported scan type: {command.scan_type}")
                 status = ScanStatus.create_error(
                     command.scan_id,
                     f"Unsupported scan type: {command.scan_type}",
-                    "Supported scan types are: 2d, robust_3d"
+                    "Supported scan types are: 2d, robust_3d, panorama"
                 )
                 self.publish(Topics.status_topic(command.scan_id), status.to_json())
                 return
@@ -738,6 +740,108 @@ class RPiScannerService(MQTTClientBase):
                 self.active_process = None
                 self.active_process_stop_event = None
                 self.active_process_step_event = None
+
+    def _run_panorama_servo(self, scan_id: str) -> dict:
+        """Phase-1 panorama mode: servo-only sweep (no camera capture yet)."""
+        try:
+            from robust_3d_scan_module import PicoServoController
+
+            servo_cfg = self.config.get('servo', {})
+            pano_cfg = self.config.get('panorama', {})
+
+            serial_port = servo_cfg.get('serial_port', '/dev/ttyACM0')
+            baudrate = int(servo_cfg.get('baudrate', 115200))
+            timeout = float(servo_cfg.get('timeout', 5.0))
+            settle_s = float(pano_cfg.get('settle_time', servo_cfg.get('settle_time', 0.5)))
+
+            start_deg = float(pano_cfg.get('start_deg', 0.0))
+            # 6 photos in 30deg increments over 180deg span: 0,30,60,90,120,150
+            end_deg = float(pano_cfg.get('end_deg', 180.0))
+            step_deg = float(pano_cfg.get('step_deg', 30.0))
+
+            if step_deg <= 0.0:
+                return {
+                    'success': False,
+                    'stopped': False,
+                    'point_count': 0,
+                    'files': [],
+                    'error': 'Invalid panorama step size',
+                    'message': 'Panorama step_deg must be > 0',
+                    'scan_quality': {}
+                }
+
+            angles = []
+            current = start_deg
+            while current < end_deg:
+                angles.append(round(current, 2))
+                current += step_deg
+
+            if not angles:
+                return {
+                    'success': False,
+                    'stopped': False,
+                    'point_count': 0,
+                    'files': [],
+                    'error': 'No panorama angles generated',
+                    'message': 'Panorama configuration produced zero steps',
+                    'scan_quality': {}
+                }
+
+            servo = PicoServoController(serial_port, baudrate=baudrate, timeout=timeout)
+            try:
+                servo.set_policy('PANORAMA')
+
+                for idx, angle in enumerate(angles):
+                    if self.stop_requested.is_set():
+                        return {
+                            'success': False,
+                            'stopped': True,
+                            'point_count': idx,
+                            'files': [],
+                            'error': None,
+                            'message': 'Panorama stopped by user',
+                            'scan_quality': {}
+                        }
+
+                    self._publish_started_status(
+                        scan_id,
+                        f'Panorama servo step {idx + 1}/{len(angles)} at {angle:.1f}°'
+                    )
+                    servo.set_angle(angle)
+                    time.sleep(settle_s)
+            finally:
+                try:
+                    servo.detach()
+                except Exception:
+                    pass
+
+            return {
+                'success': True,
+                'stopped': False,
+                'point_count': len(angles),
+                'files': [],
+                'error': None,
+                'message': f'Panorama servo sweep completed ({len(angles)} steps)',
+                'scan_quality': {
+                    'start_deg': start_deg,
+                    'end_deg': end_deg,
+                    'step_deg': step_deg,
+                    'steps': len(angles),
+                }
+            }
+
+        except Exception as e:
+            self.logger.error(f'Error running panorama servo sweep: {e}')
+            self.logger.error(traceback.format_exc())
+            return {
+                'success': False,
+                'stopped': False,
+                'point_count': 0,
+                'files': [],
+                'error': str(e),
+                'message': f'Panorama servo execution error: {str(e)}',
+                'scan_quality': {}
+            }
     
     def _count_csv_points(self, csv_file: str) -> int:
         """Count number of points in CSV file."""
