@@ -32,6 +32,7 @@ DEFAULTS = {
     'camera_step_retries': 3,
     'camera_step_retry_wait': 1.0,
     'camera_flush_frames': 6,
+    'camera_post_move_flush_s': 0.35,
     'camera_post_move_wait': 0.20,
     'camera_reopen_retries': 2,
     'camera_reopen_wait': 0.5,
@@ -275,6 +276,9 @@ def run_scan(
     camera_step_retries = int(panorama_config.get('camera_step_retries', DEFAULTS['camera_step_retries']))
     camera_step_retry_wait = float(panorama_config.get('camera_step_retry_wait', DEFAULTS['camera_step_retry_wait']))
     camera_flush_frames = int(panorama_config.get('camera_flush_frames', DEFAULTS['camera_flush_frames']))
+    camera_post_move_flush_s = float(
+        panorama_config.get('camera_post_move_flush_s', DEFAULTS['camera_post_move_flush_s'])
+    )
     camera_post_move_wait = float(panorama_config.get('camera_post_move_wait', DEFAULTS['camera_post_move_wait']))
     camera_reopen_retries = int(panorama_config.get('camera_reopen_retries', DEFAULTS['camera_reopen_retries']))
     camera_reopen_wait = float(panorama_config.get('camera_reopen_wait', DEFAULTS['camera_reopen_wait']))
@@ -408,6 +412,24 @@ def run_scan(
             time.sleep(0.05)
         return ok, frame
 
+    def _flush_camera_stream(duration_s: float) -> bool:
+        """Drain camera frames for a short duration after servo movement."""
+        if duration_s <= 0.0:
+            return True
+        if cap is None or (hasattr(cap, 'isOpened') and not cap.isOpened()):
+            return False
+
+        end_at = time.time() + duration_s
+        while time.time() < end_at:
+            if should_stop():
+                return False
+            try:
+                cap.read()
+            except Exception:
+                return False
+            time.sleep(0.01)
+        return True
+
     def _recover_camera() -> Tuple[object, object, str]:
         """Recover from camera disconnects by reopen then full rediscovery."""
         nonlocal cap, cam_index, cam_backend
@@ -465,6 +487,7 @@ def run_scan(
         servo = _connect_servo_controller()
         progress_callback({'stage': 'init', 'message': f'Homing servo to {start_deg:.1f}°'})
         _move_with_recovery(start_deg)
+        moved_since_last_capture = True
         if not _sleep_with_stop(home_settle_s):
             return {
                 'success': False,
@@ -520,17 +543,34 @@ def run_scan(
                         'scan_quality': {}
                     }
 
-                if moved_since_last_capture and camera_post_move_wait > 0.0:
-                    if not _sleep_with_stop(camera_post_move_wait):
-                        return {
-                            'success': False,
-                            'stopped': True,
-                            'point_count': len(generated_files),
-                            'files': generated_files,
-                            'error': None,
-                            'message': 'Stopped during post-move camera wait',
-                            'scan_quality': {}
-                        }
+            if moved_since_last_capture and camera_post_move_wait > 0.0:
+                if not _sleep_with_stop(camera_post_move_wait):
+                    return {
+                        'success': False,
+                        'stopped': True,
+                        'point_count': len(generated_files),
+                        'files': generated_files,
+                        'error': None,
+                        'message': 'Stopped during post-move camera wait',
+                        'scan_quality': {}
+                    }
+
+            if moved_since_last_capture and camera_post_move_flush_s > 0.0:
+                progress_callback({
+                    'stage': 'capturing',
+                    'message': (
+                        f'Flushing camera stream for {camera_post_move_flush_s:.2f}s '
+                        f'before capture step {idx + 1}/{len(angles)}'
+                    ),
+                })
+                if not _flush_camera_stream(camera_post_move_flush_s):
+                    progress_callback({
+                        'stage': 'capturing',
+                        'message': (
+                            f'Camera flush interrupted at step {idx + 1}; '
+                            'attempting capture recovery...'
+                        ),
+                    })
 
             if not _sleep_with_stop(step_dwell_s):
                 return {
