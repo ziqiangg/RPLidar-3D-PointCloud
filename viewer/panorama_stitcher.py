@@ -66,7 +66,19 @@ def show_panorama_window(image_path: str, window_title: str = "Stitched Panorama
     if image is None:
         return False, f"Unable to load panorama image: {image_path}"
 
-    cv2.namedWindow(window_title, cv2.WINDOW_NORMAL)
+    height, width = image.shape[:2]
+
+    # Keep rendered aspect ratio so wide panoramas are not squished.
+    window_flags = cv2.WINDOW_NORMAL
+    if hasattr(cv2, "WINDOW_KEEPRATIO"):
+        window_flags |= cv2.WINDOW_KEEPRATIO
+
+    cv2.namedWindow(window_title, window_flags)
+    try:
+        cv2.resizeWindow(window_title, int(width), int(height))
+    except cv2.error:
+        pass
+
     cv2.imshow(window_title, image)
 
     # Keep window responsive until user closes it or presses a key.
