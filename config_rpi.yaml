@@ -28,7 +28,7 @@ scan3d:
   # 3D scan configuration (9 steps × 20° physical = 180° sweep)
   sweep_start: 0
   sweep_end: 180
-  num_steps: 35          # Total number of servo steps
+  num_steps: 37         # Total number of servo steps
   # Per-slice scan quality parameters (optimized for maximum coverage)
   min_angle_resolution: 1.0  # 1-degree bins for finer resolution
   min_coverage: 0.70  # Target 70% coverage (252° of 360°)
@@ -70,9 +70,12 @@ panorama:
   # Webcam discovery/capture controls.
   # Use stable capture alias (index0 is video stream, index1 is metadata for this webcam).
   camera_index: /dev/v4l/by-id/usb-046d_081b_DDCCCA90-video-index0
-  camera_probe_count: 4
+  camera_probe_count: 1
   camera_fast_reopen_only_attempts: 1
-  camera_allow_cap_any_fallback: true
+  camera_healthcheck_retries: 1
+  camera_healthcheck_wait: 0.15
+  camera_strict_preferred_source: true
+  camera_allow_cap_any_fallback: false
   camera_init_time: 1.5
   camera_warmup_frames: 12
   camera_capture_retries: 2

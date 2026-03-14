@@ -40,6 +40,9 @@ DEFAULTS = {
     'camera_reopen_wait': 0.5,
     'camera_probe_count': 4,
     'camera_fast_reopen_only_attempts': 1,
+    'camera_healthcheck_retries': 1,
+    'camera_healthcheck_wait': 0.15,
+    'camera_strict_preferred_source': True,
     'camera_index': 'auto',
     'camera_allow_cap_any_fallback': False,
     'image_format': 'jpg',
@@ -118,10 +121,11 @@ def _backends_for_source(source, allow_cap_any_fallback: bool) -> List[Tuple[int
     return all_backends
 
 
-def _build_camera_candidates(preferred_index, probe_count: int) -> List[object]:
+def _build_camera_candidates(preferred_index, probe_count: int, strict_preferred_source: bool = False) -> List[object]:
     """Build ordered camera sources (paths and indexes) for discovery."""
     candidates = []
     seen = set()
+    preferred_was_explicit = False
 
     def _add_candidate(source):
         key = f"{type(source).__name__}:{source}"
@@ -131,14 +135,25 @@ def _build_camera_candidates(preferred_index, probe_count: int) -> List[object]:
         candidates.append(source)
 
     if isinstance(preferred_index, int):
+        preferred_was_explicit = True
         _add_candidate(preferred_index)
     elif isinstance(preferred_index, str):
         pref = preferred_index.strip()
         if pref and pref.lower() != 'auto':
+            preferred_was_explicit = True
             try:
                 _add_candidate(int(pref))
             except ValueError:
                 _add_candidate(pref)
+
+    if strict_preferred_source and preferred_was_explicit:
+        if isinstance(preferred_index, str):
+            pref = preferred_index.strip()
+            if pref and os.path.exists(pref):
+                real_path = os.path.realpath(pref)
+                if real_path and os.path.exists(real_path):
+                    _add_candidate(real_path)
+        return candidates
 
     # Linux camera nodes are often non-deterministic by index; prefer stable by-id paths.
     if platform.system() == 'Linux':
@@ -183,12 +198,17 @@ def _discover_camera(
     width: int,
     height: int,
     allow_cap_any_fallback: bool,
+    strict_preferred_source: bool = False,
 ) -> Tuple[object, object, str]:
     """Discover a usable webcam source and return opened capture."""
     if cv2 is None:
         raise RuntimeError('opencv-python-headless is not installed on RP5 environment')
 
-    camera_sources = _build_camera_candidates(preferred_index, probe_count)
+    camera_sources = _build_camera_candidates(
+        preferred_index,
+        probe_count,
+        strict_preferred_source=strict_preferred_source,
+    )
 
     last_error = None
 
@@ -354,6 +374,15 @@ def run_scan(
     camera_reopen_wait = float(panorama_config.get('camera_reopen_wait', DEFAULTS['camera_reopen_wait']))
     camera_fast_reopen_only_attempts = int(
         panorama_config.get('camera_fast_reopen_only_attempts', DEFAULTS['camera_fast_reopen_only_attempts'])
+    )
+    camera_healthcheck_retries = int(
+        panorama_config.get('camera_healthcheck_retries', DEFAULTS['camera_healthcheck_retries'])
+    )
+    camera_healthcheck_wait = float(
+        panorama_config.get('camera_healthcheck_wait', DEFAULTS['camera_healthcheck_wait'])
+    )
+    camera_strict_preferred_source = bool(
+        panorama_config.get('camera_strict_preferred_source', DEFAULTS['camera_strict_preferred_source'])
     )
     camera_probe_count = int(panorama_config.get('camera_probe_count', DEFAULTS['camera_probe_count']))
     camera_index = panorama_config.get('camera_index', DEFAULTS['camera_index'])
@@ -527,6 +556,17 @@ def run_scan(
             time.sleep(0.05)
         return ok, frame
 
+    def _camera_health_check() -> bool:
+        """Fast per-step camera check without a full recovery cycle."""
+        if cap is None or (hasattr(cap, 'isOpened') and not cap.isOpened()):
+            return False
+
+        try:
+            ok, frame = cap.read()
+            return bool(ok and frame is not None)
+        except Exception:
+            return False
+
     def _flush_camera_stream(duration_s: float) -> bool:
         """Drain camera frames for a short duration after servo movement."""
         if duration_s <= 0.0:
@@ -584,6 +624,7 @@ def run_scan(
                         width=max(0, image_width),
                         height=max(0, image_height),
                         allow_cap_any_fallback=camera_allow_cap_any_fallback,
+                        strict_preferred_source=camera_strict_preferred_source,
                     )
                     return cap, cam_index, cam_backend
                 except Exception as exc:
@@ -630,6 +671,7 @@ def run_scan(
             width=max(0, image_width),
             height=max(0, image_height),
             allow_cap_any_fallback=camera_allow_cap_any_fallback,
+            strict_preferred_source=camera_strict_preferred_source,
         )
         progress_callback({
             'stage': 'init',
@@ -647,6 +689,40 @@ def run_scan(
                     'message': 'Panorama stopped by user',
                     'scan_quality': {}
                 }
+
+            if not _camera_health_check():
+                recovered = False
+                for health_attempt in range(max(0, camera_healthcheck_retries) + 1):
+                    progress_callback({
+                        'stage': 'capturing',
+                        'message': (
+                            f'Camera health check failed before step {idx + 1}; '
+                            f'attempting recovery ({health_attempt + 1}/{max(0, camera_healthcheck_retries) + 1})...'
+                        ),
+                    })
+                    try:
+                        fast_only = health_attempt < max(0, camera_fast_reopen_only_attempts)
+                        _recover_camera(fast_only=fast_only)
+                        if _camera_health_check():
+                            recovered = True
+                            break
+                    except Exception:
+                        pass
+
+                    if health_attempt < max(0, camera_healthcheck_retries):
+                        if not _sleep_with_stop(max(0.0, camera_healthcheck_wait)):
+                            return {
+                                'success': False,
+                                'stopped': True,
+                                'point_count': len(generated_files),
+                                'files': generated_files,
+                                'error': None,
+                                'message': 'Stopped during camera health-check retry wait',
+                                'scan_quality': {}
+                            }
+
+                if not recovered:
+                    raise RuntimeError(f'Camera unavailable before panorama step {idx + 1}')
 
             if idx > 0:
                 progress_callback({
