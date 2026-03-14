@@ -28,6 +28,8 @@ DEFAULTS = {
     'camera_init_time': 1.5,
     'camera_warmup_frames': 12,
     'camera_capture_retries': 2,
+    'camera_flush_frames': 6,
+    'camera_post_move_wait': 0.20,
     'camera_probe_count': 6,
     'camera_index': 'auto',
     'image_format': 'jpg',
@@ -178,6 +180,8 @@ def run_scan(
     camera_init_s = float(panorama_config.get('camera_init_time', DEFAULTS['camera_init_time']))
     camera_warmup_frames = int(panorama_config.get('camera_warmup_frames', DEFAULTS['camera_warmup_frames']))
     camera_capture_retries = int(panorama_config.get('camera_capture_retries', DEFAULTS['camera_capture_retries']))
+    camera_flush_frames = int(panorama_config.get('camera_flush_frames', DEFAULTS['camera_flush_frames']))
+    camera_post_move_wait = float(panorama_config.get('camera_post_move_wait', DEFAULTS['camera_post_move_wait']))
     camera_probe_count = int(panorama_config.get('camera_probe_count', DEFAULTS['camera_probe_count']))
     camera_index = panorama_config.get('camera_index', DEFAULTS['camera_index'])
     image_fmt = str(panorama_config.get('image_format', DEFAULTS['image_format'])).strip().lower()
@@ -234,6 +238,9 @@ def run_scan(
     servo = None
     cap = None
 
+    # This tracks whether we should perform extra post-move warmup before capture.
+    moved_since_last_capture = False
+
     def _sleep_with_stop(duration_s: float) -> bool:
         end_at = time.time() + max(0.0, duration_s)
         while time.time() < end_at:
@@ -280,6 +287,23 @@ def run_scan(
                 if not _sleep_with_stop(servo_reconnect_delay):
                     raise RuntimeError('Stopped during servo recovery')
 
+    def _capture_fresh_frame() -> Tuple[bool, object]:
+        """Capture a fresh frame by flushing buffered frames first."""
+        for _ in range(max(0, camera_flush_frames)):
+            try:
+                cap.grab()
+            except Exception:
+                break
+
+        ok = False
+        frame = None
+        for _ in range(camera_capture_retries + 1):
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                return ok, frame
+            time.sleep(0.05)
+        return ok, frame
+
     try:
         progress_callback({'stage': 'init', 'message': 'Initializing panorama servo and webcam...'})
 
@@ -324,6 +348,7 @@ def run_scan(
 
             if idx > 0:
                 _move_with_recovery(angle)
+                moved_since_last_capture = True
                 if not _sleep_with_stop(step_settle_s):
                     return {
                         'success': False,
@@ -334,6 +359,18 @@ def run_scan(
                         'message': 'Stopped during panorama settle',
                         'scan_quality': {}
                     }
+
+                if moved_since_last_capture and camera_post_move_wait > 0.0:
+                    if not _sleep_with_stop(camera_post_move_wait):
+                        return {
+                            'success': False,
+                            'stopped': True,
+                            'point_count': len(generated_files),
+                            'files': generated_files,
+                            'error': None,
+                            'message': 'Stopped during post-move camera wait',
+                            'scan_quality': {}
+                        }
 
             if not _sleep_with_stop(step_dwell_s):
                 return {
@@ -346,13 +383,7 @@ def run_scan(
                     'scan_quality': {}
                 }
 
-            ok = False
-            frame = None
-            for _ in range(camera_capture_retries + 1):
-                ok, frame = cap.read()
-                if ok and frame is not None:
-                    break
-                time.sleep(0.05)
+            ok, frame = _capture_fresh_frame()
 
             if not ok or frame is None:
                 raise RuntimeError(f'Camera capture failed at panorama step {idx + 1}')
@@ -370,6 +401,7 @@ def run_scan(
                 raise RuntimeError(f'Failed writing image: {image_path}')
 
             generated_files.append(image_path)
+            moved_since_last_capture = False
             file_callback(image_path)
             progress_callback({
                 'stage': 'capturing',

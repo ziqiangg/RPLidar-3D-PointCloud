@@ -173,8 +173,8 @@ class RPiScannerService(MQTTClientBase):
         
         self.logger.info("RPi Scanner Service initialized")
 
-    def _cleanup_previous_scan_outputs(self):
-        """Remove prior scan artifacts only when a new scan is accepted."""
+    def _cleanup_previous_scan_outputs(self, scan_type: str):
+        """Remove prior artifacts only for the requested scan type."""
         data_dir = self.config.get('data', {}).get('output_dir', './data')
         if not data_dir:
             data_dir = './data'
@@ -182,22 +182,29 @@ class RPiScannerService(MQTTClientBase):
         if not os.path.exists(data_dir):
             return
 
-        patterns = [
-            # Current deterministic outputs
-            'scan.csv',
-            'scan.ply',
-            'robust_scan_full.csv',
-            'robust_scan_full.ply',
-            'robust_slice_*.ply',
-            # Legacy timestamped outputs
-            'scan_*.csv',
-            'scan_*.ply',
-            'robust_scan_full_*.csv',
-            'robust_scan_full_*.ply',
-            'panorama_*.jpg',
-            'panorama_*.jpeg',
-            'panorama_*.png',
-        ]
+        normalized = (scan_type or '').strip().lower()
+        if normalized == '2d':
+            patterns = [
+                'scan.csv',
+                'scan.ply',
+                # Legacy 2D timestamped outputs
+                'scan_*.csv',
+                'scan_*.ply',
+            ]
+        elif normalized in ('3d', 'robust_3d'):
+            patterns = [
+                'robust_scan_full.csv',
+                'robust_scan_full.ply',
+                'robust_slice_*.ply',
+                # Legacy robust outputs
+                'robust_scan_full_*.csv',
+                'robust_scan_full_*.ply',
+            ]
+        elif normalized == 'panorama':
+            patterns = []
+        else:
+            # Unknown type: do not delete anything unexpectedly.
+            patterns = []
 
         to_remove = set()
         for pattern in patterns:
@@ -214,10 +221,12 @@ class RPiScannerService(MQTTClientBase):
                 self.logger.warning(f"Failed removing previous output {path}: {e}")
 
         if removed:
-            self.logger.info(f"Removed {removed} previous scan artifact(s) from {data_dir}")
+            self.logger.info(
+                f"Removed {removed} previous '{normalized}' artifact(s) from {data_dir}"
+            )
 
         images_dir = os.path.join(data_dir, 'images')
-        if os.path.isdir(images_dir):
+        if normalized == 'panorama' and os.path.isdir(images_dir):
             image_patterns = ['panorama_*.jpg', 'panorama_*.jpeg', 'panorama_*.png']
             img_removed = 0
             for pattern in image_patterns:
@@ -229,7 +238,9 @@ class RPiScannerService(MQTTClientBase):
                         except Exception as e:
                             self.logger.warning(f"Failed removing previous image {path}: {e}")
             if img_removed:
-                self.logger.info(f"Removed {img_removed} previous panorama image(s) from {images_dir}")
+                self.logger.info(
+                    f"Removed {img_removed} previous panorama image(s) from {images_dir}"
+                )
     
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from YAML file."""
@@ -296,7 +307,7 @@ class RPiScannerService(MQTTClientBase):
                     return
 
                 # Retain previous outputs until a new scan is accepted, then clear.
-                self._cleanup_previous_scan_outputs()
+                self._cleanup_previous_scan_outputs(command.scan_type)
 
                 # Mark running and start worker thread so MQTT callbacks remain responsive.
                 self.current_scan_id = command.scan_id

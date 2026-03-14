@@ -2,6 +2,9 @@
 *.csv
 *.ply
 *.pcd
+*.png
+*.jpg
+*.jpeg
 
 #folder
 __pycache__/
