@@ -8,6 +8,7 @@ import os
 import sys
 import subprocess
 import threading
+from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog
 import numpy as np
@@ -21,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from viewer import config
 from viewer.point_cloud_loader import PointCloudLoader
 from viewer.scan_controller import ScanController
+from viewer.panorama_tools import CAPTURE_SPEC, stitch_panorama_from_dir
 
 
 class RPLidarViewerApp:
@@ -51,6 +53,10 @@ class RPLidarViewerApp:
         self.viz_status_label = None
         self.scan_status_label = None
         self.step_scan_btn = None
+        self.panorama_status_label = None
+        self.panorama_info_label = None
+        self.panorama_images_dir_label = None
+        self.panorama_output_label = None
         
         # State
         self.current_file = None
@@ -91,6 +97,12 @@ class RPLidarViewerApp:
         print("[DEBUG] Visualization controls created, adding to tabs...")
         self.tabs.add_tab("Visualization", viz_controls)
         print("[DEBUG] Visualization tab added")
+
+        # Tab 3: Panorama tools
+        print("[DEBUG] Creating panorama controls...")
+        panorama_tab = self._create_panorama_tab(em)
+        self.tabs.add_tab("Panorama", panorama_tab)
+        print("[DEBUG] Panorama tab added")
         
         # Add TabControl to main layout
         main_layout.add_child(self.tabs)
@@ -266,6 +278,157 @@ class RPLidarViewerApp:
             import traceback
             traceback.print_exc()
             raise
+
+    def _create_panorama_tab(self, em: float) -> gui.Widget:
+        """Create panorama stitching/render controls using OpenCV."""
+        tab = gui.Vert(0.5 * em, gui.Margins(em, em, em, em))
+
+        title = gui.Label("Panorama Stitching (OpenCV)")
+        tab.add_child(title)
+        tab.add_fixed(em)
+
+        profile_panel = gui.CollapsableVert("Capture Profile", 0.25 * em, gui.Margins(em, 0, 0, 0))
+        profile_panel.set_is_open(True)
+        profile_text = (
+            f"C270 profile: {CAPTURE_SPEC.width_px}x{CAPTURE_SPEC.height_px}, "
+            f"diag FOV {CAPTURE_SPEC.diag_fov_deg:.0f} deg, "
+            f"angles {CAPTURE_SPEC.start_deg:.0f}-{CAPTURE_SPEC.end_deg:.0f} "
+            f"every {CAPTURE_SPEC.step_deg:.0f} deg "
+            f"({CAPTURE_SPEC.expected_capture_count} images expected)."
+        )
+        self.panorama_info_label = gui.Label(profile_text)
+        profile_panel.add_child(self.panorama_info_label)
+        tab.add_child(profile_panel)
+        tab.add_fixed(em)
+
+        input_panel = gui.CollapsableVert("Inputs", 0.25 * em, gui.Margins(em, 0, 0, 0))
+        input_panel.set_is_open(True)
+
+        images_dir_row = gui.Horiz(0.5 * em)
+        images_dir_row.add_child(gui.Label("Images Folder:"))
+        self.panorama_images_dir_label = gui.Label(self._get_default_panorama_images_dir())
+        images_dir_row.add_child(self.panorama_images_dir_label)
+        choose_images_btn = gui.Button("Choose...")
+        choose_images_btn.set_on_clicked(self._on_choose_panorama_images_dir)
+        images_dir_row.add_child(choose_images_btn)
+        input_panel.add_child(images_dir_row)
+
+        output_row = gui.Horiz(0.5 * em)
+        output_row.add_child(gui.Label("Stitched Output:"))
+        self.panorama_output_label = gui.Label(self._build_default_panorama_output_path())
+        output_row.add_child(self.panorama_output_label)
+        input_panel.add_child(output_row)
+
+        tab.add_child(input_panel)
+        tab.add_fixed(em)
+
+        actions_panel = gui.CollapsableVert("Actions", 0.25 * em, gui.Margins(em, 0, 0, 0))
+        actions_panel.set_is_open(True)
+
+        actions_row = gui.Horiz(0.5 * em)
+        stitch_btn = gui.Button("Stitch Equirectangular Panorama")
+        stitch_btn.set_on_clicked(self._on_stitch_panorama)
+        actions_row.add_child(stitch_btn)
+
+        render_btn = gui.Button("Render Stitched Panorama")
+        render_btn.set_on_clicked(self._on_render_panorama)
+        actions_row.add_child(render_btn)
+
+        actions_row.add_stretch()
+        actions_panel.add_child(actions_row)
+        tab.add_child(actions_panel)
+        tab.add_fixed(em)
+
+        status_panel = gui.CollapsableVert("Status", 0.25 * em, gui.Margins(em, 0, 0, 0))
+        status_panel.set_is_open(True)
+        self.panorama_status_label = gui.Label("Status: Ready")
+        status_panel.add_child(self.panorama_status_label)
+        tab.add_child(status_panel)
+        tab.add_stretch()
+
+        return tab
+
+    def _get_default_panorama_images_dir(self) -> str:
+        return os.path.join(config.DATA_DIR, "images")
+
+    def _build_default_panorama_output_path(self) -> str:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return os.path.join(self._get_default_panorama_images_dir(), f"panorama_stitched_{ts}.jpg")
+
+    def _set_panorama_status(self, message: str):
+        if self.panorama_status_label:
+            self.panorama_status_label.text = f"Status: {message}"
+        print(f"[PANORAMA] {message}")
+
+    def _on_choose_panorama_images_dir(self):
+        """Choose panorama source image folder."""
+        selected_dir = [None]
+
+        def ask_dir():
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            dirname = filedialog.askdirectory(
+                parent=root,
+                title="Select Panorama Images Folder",
+                initialdir=self._get_default_panorama_images_dir(),
+            )
+            root.destroy()
+            selected_dir[0] = dirname
+
+        t = threading.Thread(target=ask_dir)
+        t.start()
+        t.join()
+
+        dirname = selected_dir[0]
+        if not dirname:
+            self._set_panorama_status("Folder selection cancelled")
+            return
+
+        self.panorama_images_dir_label.text = dirname
+        self.panorama_output_label.text = self._build_default_panorama_output_path()
+        self._set_panorama_status(f"Images folder set: {dirname}")
+
+    def _on_stitch_panorama(self):
+        """Stitch panorama images using OpenCV stitcher."""
+        images_dir = self.panorama_images_dir_label.text if self.panorama_images_dir_label else ""
+        if not images_dir:
+            self._set_panorama_status("No images folder selected")
+            return
+
+        output_path = self.panorama_output_label.text if self.panorama_output_label else ""
+        if not output_path:
+            output_path = self._build_default_panorama_output_path()
+
+        self._set_panorama_status("Stitching panorama with OpenCV...")
+        ok, msg, stitched_path = stitch_panorama_from_dir(images_dir, output_path)
+        if not ok:
+            self._set_panorama_status(msg)
+            return
+
+        if self.panorama_output_label:
+            self.panorama_output_label.text = stitched_path
+        self._set_panorama_status(msg)
+
+    def _on_render_panorama(self):
+        """Render stitched panorama using standalone OpenCV window."""
+        image_path = self.panorama_output_label.text if self.panorama_output_label else ""
+        if not image_path or not os.path.exists(image_path):
+            self._set_panorama_status("No stitched panorama found. Stitch first.")
+            return
+
+        try:
+            renderer_script = os.path.join(os.path.dirname(__file__), 'panorama_renderer.py')
+            python_exe = sys.executable
+            cmd = [python_exe, renderer_script, image_path]
+
+            subprocess.Popen(
+                cmd,
+                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
+            )
+            self._set_panorama_status("Panorama preview window opened (press q or Esc to close)")
+        except Exception as e:
+            self._set_panorama_status(f"Render failed: {e}")
     
     def _on_close(self):
         """Handle window close event."""
