@@ -56,17 +56,23 @@ panorama:
   start_deg: 0
   end_deg: 180
   step_deg: 30
-  # Panorama uses large angular jumps. Enable dynamic settle scaling from robust_3d reference.
-  dynamic_settle: true
-  settle_scale: 1.4
-  reference_step_deg: 5.3
-  min_settle_time: 0.8
-  max_settle_time: 4.5
+  # Servo timing profile for stable 30-degree jumps.
   home_settle_time: 1.5
+  step_settle_time: 1.0
   step_dwell_time: 0.35
-  home_dwell_time: 0.50
+  # Servo I/O recovery controls.
   servo_io_retries: 2
   servo_reconnect_delay: 0.5
+  # Webcam discovery/capture controls.
+  camera_index: auto
+  camera_probe_count: 6
+  camera_init_time: 1.5
+  camera_warmup_frames: 12
+  camera_capture_retries: 2
+  image_format: jpg
+  image_quality: 90
+  image_width: 1280
+  image_height: 720
   
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR

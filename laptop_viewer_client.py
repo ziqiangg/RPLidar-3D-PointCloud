@@ -216,7 +216,7 @@ class LaptopViewerClient(MQTTClientBase):
             
             self.logger.info(f"Reassembling {file_format} file for scan {scan_id}")
             
-            # Ensure data directory exists
+            # Ensure receive directory exists; images may be routed into subdirs.
             data_dir = self.config['data']['receive_dir']
             os.makedirs(data_dir, exist_ok=True)
             
@@ -228,21 +228,39 @@ class LaptopViewerClient(MQTTClientBase):
                     return
                 file_data += buffer['chunks'][i]
             
-            # Save file with original filename from metadata, or default to scan.ext
-            file_extension = 'csv' if file_format == 'csv' else 'ply'
+            extension_map = {
+                'csv': 'csv',
+                'ply': 'ply',
+                'jpg': 'jpg',
+                'jpeg': 'jpeg',
+                'png': 'png',
+            }
+            file_extension = extension_map.get(file_format, 'bin')
             
             # Get original filename from metadata if available
             original_filename = None
             if buffer.get('metadata') and isinstance(buffer['metadata'], dict):
                 original_filename = buffer['metadata'].get('filename')
+                subdir = buffer['metadata'].get('subdir')
+            else:
+                subdir = None
             
             # Determine filename: use original if available, otherwise default
             if original_filename:
                 filename = os.path.basename(original_filename)
             else:
                 filename = f"scan.{file_extension}"
+
+            # Route image-like payloads into receive_dir/images by default.
+            if not subdir and file_format in ('jpg', 'jpeg', 'png'):
+                subdir = 'images'
+
+            target_dir = data_dir
+            if subdir:
+                target_dir = os.path.join(data_dir, subdir)
+                os.makedirs(target_dir, exist_ok=True)
             
-            file_path = os.path.join(data_dir, filename)
+            file_path = os.path.join(target_dir, filename)
             
             with open(file_path, 'wb') as f:
                 f.write(file_data)

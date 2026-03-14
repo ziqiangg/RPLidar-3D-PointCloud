@@ -33,7 +33,6 @@ from mqtt_protocol import (
     DataMessage,
     MessageDecoder
 )
-from utils.port_config import get_default_servo_port
 
 
 def _run_scan_3d_worker(
@@ -195,6 +194,9 @@ class RPiScannerService(MQTTClientBase):
             'scan_*.ply',
             'robust_scan_full_*.csv',
             'robust_scan_full_*.ply',
+            'panorama_*.jpg',
+            'panorama_*.jpeg',
+            'panorama_*.png',
         ]
 
         to_remove = set()
@@ -213,6 +215,21 @@ class RPiScannerService(MQTTClientBase):
 
         if removed:
             self.logger.info(f"Removed {removed} previous scan artifact(s) from {data_dir}")
+
+        images_dir = os.path.join(data_dir, 'images')
+        if os.path.isdir(images_dir):
+            image_patterns = ['panorama_*.jpg', 'panorama_*.jpeg', 'panorama_*.png']
+            img_removed = 0
+            for pattern in image_patterns:
+                for path in glob.glob(os.path.join(images_dir, pattern)):
+                    if os.path.isfile(path):
+                        try:
+                            os.remove(path)
+                            img_removed += 1
+                        except Exception as e:
+                            self.logger.warning(f"Failed removing previous image {path}: {e}")
+            if img_removed:
+                self.logger.info(f"Removed {img_removed} previous panorama image(s) from {images_dir}")
     
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from YAML file."""
@@ -743,260 +760,28 @@ class RPiScannerService(MQTTClientBase):
                 self.active_process_step_event = None
 
     def _run_panorama_servo(self, scan_id: str) -> dict:
-        """Phase-1 panorama mode: servo-only sweep (no camera capture yet)."""
+        """Panorama mode: servo steps with one camera frame captured per step."""
         try:
-            from robust_3d_scan_module import PicoServoController, _is_io_error
+            from panorama_scan_module import run_scan
 
             servo_cfg = self.config.get('servo', {})
             pano_cfg = self.config.get('panorama', {})
-            scan3d_cfg = self.config.get('scan3d', {})
+            data_dir = self.config.get('data', {}).get('output_dir', './data')
 
-            serial_port = get_default_servo_port(servo_cfg.get('serial_port', 'auto'))
-            baudrate = int(servo_cfg.get('baudrate', 115200))
-            timeout = float(servo_cfg.get('timeout', 5.0))
-            base_settle_s = float(servo_cfg.get('settle_time', 0.5))
+            def _progress_cb(progress: dict):
+                msg = progress.get('message', 'Panorama in progress...')
+                image_count = progress.get('point_count')
+                self._publish_started_status(scan_id, msg, point_count=image_count)
 
-            start_deg = float(pano_cfg.get('start_deg', 0.0))
-            # 6 photos in 30deg increments over 180deg span: 0,30,60,90,120,150
-            end_deg = float(pano_cfg.get('end_deg', 180.0))
-            step_deg = float(pano_cfg.get('step_deg', 30.0))
-            dynamic_settle = bool(pano_cfg.get('dynamic_settle', True))
-            settle_scale = float(pano_cfg.get('settle_scale', 1.4))
-            min_settle_s = float(pano_cfg.get('min_settle_time', base_settle_s))
-            max_settle_s = float(pano_cfg.get('max_settle_time', max(3.5, base_settle_s)))
-            home_settle_s = float(pano_cfg.get('home_settle_time', max(base_settle_s * 2.5, min_settle_s)))
-            step_dwell_s = float(pano_cfg.get('step_dwell_time', 0.35))
-            home_dwell_s = float(pano_cfg.get('home_dwell_time', 0.50))
-            servo_io_retries = int(pano_cfg.get('servo_io_retries', 2))
-            reconnect_delay_s = float(pano_cfg.get('servo_reconnect_delay', 0.5))
+            result = run_scan(
+                output_dir=data_dir,
+                servo_config=servo_cfg,
+                panorama_config=pano_cfg,
+                should_stop=self.stop_requested.is_set,
+                progress_callback=_progress_cb,
+            )
 
-            robust_start = float(scan3d_cfg.get('sweep_start', 0.0))
-            robust_end = float(scan3d_cfg.get('sweep_end', 180.0))
-            robust_steps = int(scan3d_cfg.get('num_steps', 35))
-            if robust_steps > 1:
-                robust_step_deg = abs(robust_end - robust_start) / float(robust_steps - 1)
-            else:
-                robust_step_deg = 5.0
-
-            reference_step_deg = float(pano_cfg.get('reference_step_deg', robust_step_deg))
-            if reference_step_deg <= 0.0:
-                reference_step_deg = 5.0
-
-            if step_deg <= 0.0:
-                return {
-                    'success': False,
-                    'stopped': False,
-                    'point_count': 0,
-                    'files': [],
-                    'error': 'Invalid panorama step size',
-                    'message': 'Panorama step_deg must be > 0',
-                    'scan_quality': {}
-                }
-
-            if end_deg <= start_deg:
-                return {
-                    'success': False,
-                    'stopped': False,
-                    'point_count': 0,
-                    'files': [],
-                    'error': 'Invalid panorama range',
-                    'message': 'Panorama end_deg must be greater than start_deg',
-                    'scan_quality': {}
-                }
-
-            angles = []
-            current = start_deg
-            while current < end_deg:
-                angles.append(round(current, 2))
-                current += step_deg
-
-            if not angles:
-                return {
-                    'success': False,
-                    'stopped': False,
-                    'point_count': 0,
-                    'files': [],
-                    'error': 'No panorama angles generated',
-                    'message': 'Panorama configuration produced zero steps',
-                    'scan_quality': {}
-                }
-
-            def _compute_settle(delta_deg: float) -> float:
-                if not dynamic_settle:
-                    settle = float(pano_cfg.get('settle_time', base_settle_s))
-                    settle = settle * max(1.0, settle_scale)
-                    return max(min_settle_s, min(max_settle_s, settle))
-                scale = abs(delta_deg) / reference_step_deg
-                settle = base_settle_s * max(1.0, scale)
-                settle = settle * max(1.0, settle_scale)
-                settle = max(min_settle_s, min(max_settle_s, settle))
-                return settle
-
-            def _sleep_with_stop(duration_s: float) -> bool:
-                end_at = time.time() + max(0.0, duration_s)
-                while time.time() < end_at:
-                    if self.stop_requested.is_set():
-                        return False
-                    time.sleep(0.05)
-                return True
-
-            servo = None
-
-            def _connect_servo() -> PicoServoController:
-                last_exc = None
-                for attempt in range(servo_io_retries + 1):
-                    resolved_port = get_default_servo_port(servo_cfg.get('serial_port', 'auto'))
-                    try:
-                        self.logger.info(
-                            f"Connecting panorama servo on {resolved_port} "
-                            f"(attempt {attempt + 1}/{servo_io_retries + 1})"
-                        )
-                        s = PicoServoController(resolved_port, baudrate=baudrate, timeout=timeout)
-                        s.set_policy('PANORAMA')
-                        return s
-                    except Exception as exc:
-                        last_exc = exc
-                        if attempt >= servo_io_retries:
-                            break
-                        if not _sleep_with_stop(reconnect_delay_s):
-                            break
-                if last_exc:
-                    raise last_exc
-                raise RuntimeError('Failed to connect panorama servo controller')
-
-            def _move_with_recovery(target_angle: float, context: str):
-                nonlocal servo
-                for attempt in range(servo_io_retries + 1):
-                    if servo is None:
-                        servo = _connect_servo()
-
-                    try:
-                        servo.set_angle(target_angle)
-                        return
-                    except Exception as exc:
-                        is_io = _is_io_error(exc) or 'SerialException' in str(type(exc))
-                        if (not is_io) or attempt >= servo_io_retries:
-                            raise
-
-                        self._publish_started_status(
-                            scan_id,
-                            (
-                                f"Panorama recovering servo I/O during {context} "
-                                f"({attempt + 1}/{servo_io_retries})..."
-                            )
-                        )
-                        try:
-                            servo.detach()
-                        except Exception:
-                            pass
-                        servo = None
-                        if not _sleep_with_stop(reconnect_delay_s):
-                            raise RuntimeError('Stopped during panorama servo recovery')
-
-                raise RuntimeError('Panorama servo move retry budget exhausted')
-
-            try:
-                servo = _connect_servo()
-
-                # First force known reference angle before beginning panorama sequence.
-                self._publish_started_status(scan_id, f'Panorama homing to {start_deg:.1f}°')
-                _move_with_recovery(start_deg, 'homing')
-                if not _sleep_with_stop(home_settle_s):
-                    return {
-                        'success': False,
-                        'stopped': True,
-                        'point_count': 0,
-                        'files': [],
-                        'error': None,
-                        'message': 'Panorama stopped during homing settle',
-                        'scan_quality': {}
-                    }
-                if not _sleep_with_stop(home_dwell_s):
-                    return {
-                        'success': False,
-                        'stopped': True,
-                        'point_count': 0,
-                        'files': [],
-                        'error': None,
-                        'message': 'Panorama stopped during home dwell',
-                        'scan_quality': {}
-                    }
-
-                prev_angle = start_deg
-
-                for idx, angle in enumerate(angles):
-                    if self.stop_requested.is_set():
-                        return {
-                            'success': False,
-                            'stopped': True,
-                            'point_count': idx,
-                            'files': [],
-                            'error': None,
-                            'message': 'Panorama stopped by user',
-                            'scan_quality': {}
-                        }
-
-                    delta = abs(angle - prev_angle)
-                    settle_s = _compute_settle(delta)
-                    self._publish_started_status(
-                        scan_id,
-                        (
-                            f'Panorama servo step {idx + 1}/{len(angles)} at {angle:.1f}° '
-                            f'(delta={delta:.1f}°, settle={settle_s:.2f}s)'
-                        )
-                    )
-
-                    if idx > 0:
-                        _move_with_recovery(angle, f'step {idx + 1}')
-                        if not _sleep_with_stop(settle_s):
-                            return {
-                                'success': False,
-                                'stopped': True,
-                                'point_count': idx,
-                                'files': [],
-                                'error': None,
-                                'message': 'Panorama stopped during step settle',
-                                'scan_quality': {}
-                            }
-                        if not _sleep_with_stop(step_dwell_s):
-                            return {
-                                'success': False,
-                                'stopped': True,
-                                'point_count': idx,
-                                'files': [],
-                                'error': None,
-                                'message': 'Panorama stopped during step dwell',
-                                'scan_quality': {}
-                            }
-                        prev_angle = angle
-            finally:
-                try:
-                    if servo is not None:
-                        servo.detach()
-                except Exception:
-                    pass
-
-            return {
-                'success': True,
-                'stopped': False,
-                'point_count': len(angles),
-                'files': [],
-                'error': None,
-                'message': f'Panorama servo sweep completed ({len(angles)} steps)',
-                'scan_quality': {
-                    'start_deg': start_deg,
-                    'end_deg': end_deg,
-                    'step_deg': step_deg,
-                    'steps': len(angles),
-                    'dynamic_settle': dynamic_settle,
-                    'settle_scale': settle_scale,
-                    'reference_step_deg': reference_step_deg,
-                    'home_settle_s': home_settle_s,
-                    'step_dwell_s': step_dwell_s,
-                    'home_dwell_s': home_dwell_s,
-                    'servo_io_retries': servo_io_retries,
-                }
-            }
+            return result
 
         except Exception as e:
             self.logger.error(f'Error running panorama servo sweep: {e}')
@@ -1026,7 +811,16 @@ class RPiScannerService(MQTTClientBase):
         """Send scan data files via MQTT."""
         try:
             for file_path in files:
-                file_format = 'csv' if file_path.endswith('.csv') else 'ply'
+                _, ext = os.path.splitext(file_path)
+                ext = ext.lower()
+                if ext in ('.csv', '.ply', '.jpg', '.jpeg', '.png'):
+                    file_format = ext.lstrip('.')
+                else:
+                    file_format = 'bin'
+
+                metadata_extra = {}
+                if 'images' in os.path.normpath(file_path).split(os.sep):
+                    metadata_extra['subdir'] = 'images'
                 
                 self.logger.info(f"Sending {file_format} file: {file_path}")
                 
@@ -1035,6 +829,7 @@ class RPiScannerService(MQTTClientBase):
                     scan_id,
                     file_path,
                     file_format,
+                    metadata_extra=metadata_extra,
                     chunk_size=256 * 1024  # 256KB chunks
                 )
                 

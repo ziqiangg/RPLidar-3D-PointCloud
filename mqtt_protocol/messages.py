@@ -179,7 +179,7 @@ class DataMessage:
     Topic: rplidar/data/<scan_id>
     """
     scan_id: str
-    format: str  # "csv" or "ply"
+    format: str  # e.g. "csv", "ply", "jpg", "png"
     chunk_index: int
     total_chunks: int
     data: str  # Base64 encoded data chunk
@@ -196,16 +196,23 @@ class DataMessage:
         return cls(**data)
     
     @classmethod
-    def create_from_file(cls, scan_id: str, file_path: str, file_format: str, 
-                        chunk_size: int = 256 * 1024) -> list['DataMessage']:
+    def create_from_file(
+        cls,
+        scan_id: str,
+        file_path: str,
+        file_format: str,
+        chunk_size: int = 256 * 1024,
+        metadata_extra: Optional[Dict[str, Any]] = None,
+    ) -> list['DataMessage']:
         """
         Create multiple DataMessage chunks from a file.
         
         Args:
             scan_id: Unique scan identifier
             file_path: Path to file to chunk
-            file_format: "csv" or "ply"
+            file_format: File format label ("csv", "ply", "jpg", etc)
             chunk_size: Size of each chunk in bytes (default 256KB)
+            metadata_extra: Optional metadata to merge into first chunk
         
         Returns:
             List of DataMessage objects
@@ -225,6 +232,8 @@ class DataMessage:
             'file_size': file_size,
             'filename': filename
         }
+        if metadata_extra:
+            metadata.update(metadata_extra)
         
         for i in range(total_chunks):
             start = i * chunk_size

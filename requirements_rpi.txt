@@ -16,6 +16,9 @@ pyyaml
 # Numerical operations
 numpy
 
+# Webcam capture for panorama mode
+opencv-python-headless
+
 # Servo control (Raspberry Pi)
 gpiozero
 lgpio
