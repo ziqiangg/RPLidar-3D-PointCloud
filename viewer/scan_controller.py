@@ -6,7 +6,7 @@ Communicates with Raspberry Pi scanner service over MQTT.
 
 import os
 import sys
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 # Add parent directory to path for mqtt_protocol import
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,8 +28,10 @@ class ScanController:
         self.scan_running = False
         self.status_callback: Optional[Callable] = None
         self.completion_callback: Optional[Callable] = None
+        self.data_callback: Optional[Callable] = None
         self.current_scan_type: Optional[str] = None
         self.current_scan_id: Optional[str] = None
+        self.scan_type_by_id: Dict[str, str] = {}
         
         # Initialize MQTT client
         try:
@@ -65,13 +67,22 @@ class ScanController:
             callback: Function(scan_type: str, success: bool, file_path: str)
         """
         self.completion_callback = callback
+
+    def set_data_callback(self, callback: Callable):
+        """
+        Set callback for completed file reassembly.
+
+        Args:
+            callback: Function(scan_id: str, scan_type: str, file_paths: list)
+        """
+        self.data_callback = callback
     
     def start_scan(self, scan_type: str, params: dict = None):
         """
         Start a scan via MQTT command to Raspberry Pi.
         
         Args:
-            scan_type: "2d" or "3d"
+            scan_type: "2d", "robust_3d", or "panorama"
             params: Optional parameters including:
                 - port: Serial port (e.g., "/dev/ttyUSB0") or "auto"
         """
@@ -107,6 +118,7 @@ class ScanController:
                 scan_type=scan_type,
                 port=port
             )
+            self.scan_type_by_id[self.current_scan_id] = scan_type
             
             self._update_status("started", f"Scan request sent to Raspberry Pi (ID: {self.current_scan_id})")
             print(f"[SCAN] Scan requested: {self.current_scan_id}")
@@ -143,6 +155,8 @@ class ScanController:
             # Optimistic local clear so UI is never hard-stuck in running state.
             # If the scan is still active on RPi, next start request will receive "busy".
             self.scan_running = False
+            if self.current_scan_id:
+                self.scan_type_by_id.pop(self.current_scan_id, None)
             self.current_scan_id = None
             self.current_scan_type = None
         except Exception as e:
@@ -155,7 +169,7 @@ class ScanController:
             print("[SCAN] No scan running to step")
             return
 
-        if self.current_scan_type != config.SCAN_TYPE_3D:
+        if self.current_scan_type != config.SCAN_TYPE_ROBUST_3D:
             print("[SCAN] Step ignored: current scan is not 3D")
             return
 
@@ -249,12 +263,8 @@ class ScanController:
                 output_file = config.SCAN_3D_PLY # Default
                 
                 # Determine output file based on scan type
-                if self.current_scan_type == config.SCAN_TYPE_3D:
+                if self.current_scan_type == config.SCAN_TYPE_ROBUST_3D:
                     output_file = config.SCAN_3D_PLY
-                elif self.current_scan_type == "robust_3d":
-                    self._merge_robust_slices(scan_id)
-                    output_file = config.SCAN_3D_PLY
-                    # Note: Completion callback will load this file
                 else:
                     output_file = config.SCAN_2D_PLY
                 
@@ -279,6 +289,13 @@ class ScanController:
         print(f"[SCAN] Data received for {scan_id}:")
         for path in file_paths:
             print(f"  - {path}")
+
+        scan_type = self.scan_type_by_id.get(scan_id, "")
+        if self.data_callback:
+            self.data_callback(scan_id, scan_type, file_paths)
+
+        # Safe to clear once reassembly callback has fired for this scan.
+        self.scan_type_by_id.pop(scan_id, None)
         
         # Files are automatically saved by the MQTT client
         # GUI can now load them

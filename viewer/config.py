@@ -19,6 +19,17 @@ SCAN_2D_CSV = os.path.join(DATA_DIR, "scan.csv")
 SCAN_2D_PLY = os.path.join(DATA_DIR, "scan.ply")
 SCAN_3D_CSV = os.path.join(DATA_DIR, "scan_3d.csv")
 SCAN_3D_PLY = os.path.join(DATA_DIR, "scan_3d.ply")
+PANORAMA_IMAGES_DIR = os.path.join(DATA_DIR, "images")
+PANORAMA_STITCHED_FILE = os.path.join(PANORAMA_IMAGES_DIR, "panorama_stitched.jpg")
+
+# Panorama capture profile (C270 + configured sweep)
+PANORAMA_CAPTURE_STEP_DEG = 30
+PANORAMA_CAPTURE_START_DEG = 0
+PANORAMA_CAPTURE_END_DEG = 150
+PANORAMA_EXPECTED_IMAGE_COUNT = 6
+PANORAMA_CAMERA_DIAGONAL_FOV_DEG = 55
+PANORAMA_CAMERA_WIDTH = 1280
+PANORAMA_CAMERA_HEIGHT = 720
 
 # Visualization Settings
 POINT_SIZE = 2.0

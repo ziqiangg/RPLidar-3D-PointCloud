@@ -21,6 +21,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from viewer import config
 from viewer.point_cloud_loader import PointCloudLoader
 from viewer.scan_controller import ScanController
+from viewer.panorama_stitcher import (
+    find_panorama_images,
+    stitch_equirectangular_panorama,
+    show_panorama_window,
+)
 
 
 class RPLidarViewerApp:
@@ -43,6 +48,7 @@ class RPLidarViewerApp:
         # Set up callbacks
         self.scan_controller.set_status_callback(self._on_scan_status)
         self.scan_controller.set_completion_callback(self._on_scan_complete)
+        self.scan_controller.set_data_callback(self._on_scan_data)
         
         # GUI components
         self.window = None
@@ -51,6 +57,9 @@ class RPLidarViewerApp:
         self.viz_status_label = None
         self.scan_status_label = None
         self.step_scan_btn = None
+        self.panorama_status_label = None
+        self.panorama_info_label = None
+        self.panorama_last_output = config.PANORAMA_STITCHED_FILE
         
         # State
         self.current_file = None
@@ -91,6 +100,11 @@ class RPLidarViewerApp:
         print("[DEBUG] Visualization controls created, adding to tabs...")
         self.tabs.add_tab("Visualization", viz_controls)
         print("[DEBUG] Visualization tab added")
+
+        print("[DEBUG] Creating panorama tab...")
+        panorama_tab = self._create_panorama_tab(em)
+        self.tabs.add_tab("Panorama", panorama_tab)
+        print("[DEBUG] Panorama tab added")
         
         # Add TabControl to main layout
         main_layout.add_child(self.tabs)
@@ -266,6 +280,54 @@ class RPLidarViewerApp:
             import traceback
             traceback.print_exc()
             raise
+
+    def _create_panorama_tab(self, em: float) -> gui.Widget:
+        """Create panorama stitching controls and OpenCV viewing actions."""
+        tab = gui.Vert(0.5 * em, gui.Margins(em, em, em, em))
+
+        title = gui.Label("Panorama Stitching (OpenCV)")
+        tab.add_child(title)
+        tab.add_fixed(em)
+
+        profile_panel = gui.CollapsableVert("Capture Profile", 0.25 * em, gui.Margins(em, 0, 0, 0))
+        profile_panel.set_is_open(True)
+        profile_text = (
+            f"Camera: Logitech C270 | Diagonal FOV: {config.PANORAMA_CAMERA_DIAGONAL_FOV_DEG} deg | "
+            f"Resolution: {config.PANORAMA_CAMERA_WIDTH}x{config.PANORAMA_CAMERA_HEIGHT}\n"
+            f"Sweep: {config.PANORAMA_CAPTURE_START_DEG}-{config.PANORAMA_CAPTURE_END_DEG} deg in "
+            f"{config.PANORAMA_CAPTURE_STEP_DEG} deg steps "
+            f"({config.PANORAMA_EXPECTED_IMAGE_COUNT} images expected)"
+        )
+        self.panorama_info_label = gui.Label(profile_text)
+        profile_panel.add_child(self.panorama_info_label)
+        tab.add_child(profile_panel)
+        tab.add_fixed(em)
+
+        actions_panel = gui.CollapsableVert("Panorama Actions", 0.25 * em, gui.Margins(em, 0, 0, 0))
+        actions_panel.set_is_open(True)
+
+        actions_row = gui.Horiz(0.5 * em)
+        show_btn = gui.Button("Show Stitched Panorama")
+        show_btn.set_on_clicked(self._on_panorama_show)
+        actions_row.add_child(show_btn)
+
+        actions_row.add_stretch()
+        actions_panel.add_child(actions_row)
+        tab.add_child(actions_panel)
+        tab.add_fixed(em)
+
+        status_panel = gui.CollapsableVert("Status", 0.25 * em, gui.Margins(em, 0, 0, 0))
+        status_panel.set_is_open(True)
+        self.panorama_status_label = gui.Label("Status: Waiting for panorama images")
+        status_panel.add_child(self.panorama_status_label)
+        tab.add_child(status_panel)
+        tab.add_stretch()
+
+        # Support existing captures: if six images already exist locally, stitch automatically.
+        worker = threading.Thread(target=self._auto_stitch_existing_images_if_ready, daemon=True)
+        worker.start()
+
+        return tab
     
     def _on_close(self):
         """Handle window close event."""
@@ -369,11 +431,117 @@ class RPLidarViewerApp:
     def _on_scan_complete(self, scan_type: str, success: bool, file_path: str):
         """Callback for scan completion."""
         print(f"[DEBUG] Scan complete callback: type={scan_type}, success={success}, file={file_path}")
+        if scan_type == config.SCAN_TYPE_PANORAMA and success:
+            print("[INFO] Panorama capture completed on RP5. Waiting for MQTT image reassembly on laptop...")
         if success and os.path.exists(file_path):
             # Just notify - don't auto-load to avoid threading issues
             # User can manually switch to viz tab and load
             print(f"[INFO] Scan saved to: {file_path}")
             print(f"[INFO] Switch to Visualization tab and click 'Load File...' to view results")
+
+    def _on_scan_data(self, scan_id: str, scan_type: str, file_paths: list):
+        """Callback for completed MQTT reassembly on laptop."""
+        print(f"[DEBUG] Scan data callback: id={scan_id}, type={scan_type}, files={len(file_paths)}")
+        if scan_type != config.SCAN_TYPE_PANORAMA:
+            return
+
+        image_paths = [
+            p for p in file_paths
+            if p.lower().endswith((".jpg", ".jpeg", ".png"))
+        ]
+        image_paths = [
+            p for p in image_paths
+            if os.path.basename(p).lower().startswith("panorama_")
+            and os.path.basename(p).split(".")[0].replace("panorama_", "").isdigit()
+        ]
+
+        indexed = {}
+        for p in image_paths:
+            stem = os.path.basename(p).split(".")[0]
+            try:
+                idx = int(stem.replace("panorama_", ""))
+            except ValueError:
+                continue
+            indexed[idx] = p
+
+        expected_indices = list(range(config.PANORAMA_EXPECTED_IMAGE_COUNT))
+        selected_paths = [indexed[i] for i in expected_indices if i in indexed]
+
+        if len(selected_paths) < config.PANORAMA_EXPECTED_IMAGE_COUNT:
+            self._update_panorama_status(
+                f"Received {len(selected_paths)} panorama images, waiting for {config.PANORAMA_EXPECTED_IMAGE_COUNT}"
+            )
+            return
+
+        self._update_panorama_status(
+            f"Received {len(image_paths)} images. Stitching panorama..."
+        )
+
+        worker = threading.Thread(
+            target=self._stitch_panorama_from_images,
+            args=(selected_paths, False),
+            daemon=True,
+        )
+        worker.start()
+
+    def _on_panorama_show(self):
+        """Open stitched panorama using OpenCV renderer."""
+        worker = threading.Thread(target=self._show_stitched_panorama, daemon=True)
+        worker.start()
+
+    def _auto_stitch_existing_images_if_ready(self):
+        """Auto-stitch if expected capture frames are already present on disk."""
+        images = find_panorama_images(config.PANORAMA_IMAGES_DIR)
+        indexed = {}
+        for p in images:
+            stem = os.path.basename(p).split(".")[0]
+            try:
+                idx = int(stem.replace("panorama_", ""))
+            except ValueError:
+                continue
+            indexed[idx] = p
+
+        expected_indices = list(range(config.PANORAMA_EXPECTED_IMAGE_COUNT))
+        selected_paths = [indexed[i] for i in expected_indices if i in indexed]
+        if len(selected_paths) < config.PANORAMA_EXPECTED_IMAGE_COUNT:
+            return
+
+        self._update_panorama_status(
+            f"Found existing {len(selected_paths)} panorama images. Stitching..."
+        )
+        self._stitch_panorama_from_images(selected_paths, auto_show=False)
+
+    def _stitch_panorama_from_images(self, image_paths: list, auto_show: bool):
+        """Perform OpenCV stitch and optionally show the result."""
+        ok, message, output_path = stitch_equirectangular_panorama(
+            image_paths=image_paths,
+            output_path=config.PANORAMA_STITCHED_FILE,
+        )
+        if not ok:
+            self._update_panorama_status(f"Stitch failed: {message}")
+            return
+
+        self.panorama_last_output = output_path
+        self._update_panorama_status(message)
+
+        if auto_show:
+            self._show_stitched_panorama()
+
+    def _show_stitched_panorama(self):
+        """Display latest stitched panorama in OpenCV window."""
+        ok, message = show_panorama_window(self.panorama_last_output, "C270 Panorama")
+        if ok:
+            self._update_panorama_status(message)
+        else:
+            self._update_panorama_status(f"OpenCV view failed: {message}")
+
+    def _update_panorama_status(self, message: str):
+        """Thread-safe panorama status update."""
+        def update():
+            if self.panorama_status_label:
+                self.panorama_status_label.text = f"Status: {message}"
+
+        gui.Application.instance.post_to_main_thread(self.window, update)
     
     def _on_load_file(self):
         """Handle load file button click."""
