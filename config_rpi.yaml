@@ -65,10 +65,12 @@ panorama:
   servo_reconnect_delay: 0.5
   # Webcam discovery/capture controls.
   camera_index: auto
-  camera_probe_count: 6
+  camera_probe_count: 12
   camera_init_time: 1.5
   camera_warmup_frames: 12
   camera_capture_retries: 2
+  camera_step_retries: 3
+  camera_step_retry_wait: 1.00
   camera_flush_frames: 6
   camera_post_move_wait: 0.20
   camera_reopen_retries: 2

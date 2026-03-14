@@ -7,6 +7,7 @@ Captures one webcam frame per servo step and saves/transfers resulting images.
 import os
 import time
 import platform
+import glob
 from typing import Optional, Callable, Tuple, List
 
 from utils.port_config import get_default_servo_port
@@ -28,11 +29,13 @@ DEFAULTS = {
     'camera_init_time': 1.5,
     'camera_warmup_frames': 12,
     'camera_capture_retries': 2,
+    'camera_step_retries': 3,
+    'camera_step_retry_wait': 1.0,
     'camera_flush_frames': 6,
     'camera_post_move_wait': 0.20,
     'camera_reopen_retries': 2,
     'camera_reopen_wait': 0.5,
-    'camera_probe_count': 6,
+    'camera_probe_count': 12,
     'camera_index': 'auto',
     'image_format': 'jpg',
     'image_quality': 90,
@@ -68,14 +71,56 @@ def _choose_backends() -> List[Tuple[int, str]]:
     ]
 
 
-def _open_camera(index: int, backend: int):
-    """Open camera with optional backend argument."""
+def _open_camera(source, backend: int):
+    """Open camera by numeric index or device path with optional backend."""
     try:
         if backend == getattr(cv2, 'CAP_ANY', 0):
-            return cv2.VideoCapture(index)
-        return cv2.VideoCapture(index, backend)
+            return cv2.VideoCapture(source)
+        return cv2.VideoCapture(source, backend)
     except TypeError:
-        return cv2.VideoCapture(index)
+        return cv2.VideoCapture(source)
+
+
+def _build_camera_candidates(preferred_index, probe_count: int) -> List[object]:
+    """Build ordered camera sources (paths and indexes) for discovery."""
+    candidates = []
+    seen = set()
+
+    def _add_candidate(source):
+        key = f"{type(source).__name__}:{source}"
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(source)
+
+    if isinstance(preferred_index, int):
+        _add_candidate(preferred_index)
+    elif isinstance(preferred_index, str):
+        pref = preferred_index.strip()
+        if pref and pref.lower() != 'auto':
+            try:
+                _add_candidate(int(pref))
+            except ValueError:
+                _add_candidate(pref)
+
+    # Linux camera nodes are often non-deterministic by index; prefer stable by-id paths.
+    if platform.system() == 'Linux':
+        for path in sorted(glob.glob('/dev/v4l/by-id/*')):
+            if os.path.exists(path):
+                _add_candidate(path)
+
+        video_nodes = sorted(
+            glob.glob('/dev/video*'),
+            key=lambda p: int(p.replace('/dev/video', '')) if p.replace('/dev/video', '').isdigit() else 10**9
+        )
+        for path in video_nodes:
+            if os.path.exists(path):
+                _add_candidate(path)
+
+    for i in range(max(1, probe_count)):
+        _add_candidate(i)
+
+    return candidates
 
 
 def _discover_camera(
@@ -85,30 +130,19 @@ def _discover_camera(
     warmup_frames: int,
     width: int,
     height: int,
-) -> Tuple[object, int, str]:
-    """Discover a usable webcam index and return opened capture."""
+) -> Tuple[object, object, str]:
+    """Discover a usable webcam source and return opened capture."""
     if cv2 is None:
         raise RuntimeError('opencv-python-headless is not installed on RP5 environment')
 
-    indices = []
-    if isinstance(preferred_index, int):
-        indices.append(preferred_index)
-    elif isinstance(preferred_index, str) and preferred_index.strip().lower() != 'auto':
-        try:
-            indices.append(int(preferred_index.strip()))
-        except ValueError:
-            pass
-
-    for i in range(max(1, probe_count)):
-        if i not in indices:
-            indices.append(i)
+    camera_sources = _build_camera_candidates(preferred_index, probe_count)
 
     backends = _choose_backends()
     last_error = None
 
-    for idx in indices:
+    for source in camera_sources:
         for backend, backend_name in backends:
-            cap = _open_camera(idx, backend)
+            cap = _open_camera(source, backend)
             if cap is None or not cap.isOpened():
                 if cap is not None:
                     cap.release()
@@ -129,9 +163,9 @@ def _discover_camera(
                 time.sleep(0.05)
 
             if ok and frame is not None:
-                return cap, idx, backend_name
+                return cap, source, backend_name
 
-            last_error = RuntimeError(f'Camera {idx} opened but no valid frame ({backend_name})')
+            last_error = RuntimeError(f'Camera {source} opened but no valid frame ({backend_name})')
             cap.release()
 
     if last_error:
@@ -140,18 +174,18 @@ def _discover_camera(
 
 
 def _open_preferred_camera(
-    preferred_index: int,
+    preferred_source,
     init_s: float,
     warmup_frames: int,
     width: int,
     height: int,
-) -> Tuple[object, int, str]:
-    """Attempt reopening only the preferred camera index first for faster recovery."""
+) -> Tuple[object, object, str]:
+    """Attempt reopening only the preferred source first for faster recovery."""
     backends = _choose_backends()
     last_error = None
 
     for backend, backend_name in backends:
-        cap = _open_camera(preferred_index, backend)
+        cap = _open_camera(preferred_source, backend)
         if cap is None or not cap.isOpened():
             if cap is not None:
                 cap.release()
@@ -168,17 +202,17 @@ def _open_preferred_camera(
         for _ in range(max(1, warmup_frames)):
             ok, frame = cap.read()
             if ok and frame is not None:
-                return cap, preferred_index, backend_name
+                return cap, preferred_source, backend_name
             time.sleep(0.05)
 
         last_error = RuntimeError(
-            f'Camera {preferred_index} reopened but no valid frame ({backend_name})'
+            f'Camera {preferred_source} reopened but no valid frame ({backend_name})'
         )
         cap.release()
 
     if last_error:
         raise last_error
-    raise RuntimeError(f'Unable to reopen preferred camera index {preferred_index}')
+    raise RuntimeError(f'Unable to reopen preferred camera source {preferred_source}')
 
 
 def _build_angles(start_deg: float, end_deg: float, step_deg: float) -> List[float]:
@@ -224,6 +258,8 @@ def run_scan(
     camera_init_s = float(panorama_config.get('camera_init_time', DEFAULTS['camera_init_time']))
     camera_warmup_frames = int(panorama_config.get('camera_warmup_frames', DEFAULTS['camera_warmup_frames']))
     camera_capture_retries = int(panorama_config.get('camera_capture_retries', DEFAULTS['camera_capture_retries']))
+    camera_step_retries = int(panorama_config.get('camera_step_retries', DEFAULTS['camera_step_retries']))
+    camera_step_retry_wait = float(panorama_config.get('camera_step_retry_wait', DEFAULTS['camera_step_retry_wait']))
     camera_flush_frames = int(panorama_config.get('camera_flush_frames', DEFAULTS['camera_flush_frames']))
     camera_post_move_wait = float(panorama_config.get('camera_post_move_wait', DEFAULTS['camera_post_move_wait']))
     camera_reopen_retries = int(panorama_config.get('camera_reopen_retries', DEFAULTS['camera_reopen_retries']))
@@ -355,7 +391,7 @@ def run_scan(
             time.sleep(0.05)
         return ok, frame
 
-    def _recover_camera() -> Tuple[object, int, str]:
+    def _recover_camera() -> Tuple[object, object, str]:
         """Recover from camera disconnects by reopen then full rediscovery."""
         nonlocal cap, cam_index, cam_backend
 
@@ -371,7 +407,7 @@ def run_scan(
             try:
                 if cam_index is not None:
                     cap, cam_index, cam_backend = _open_preferred_camera(
-                        preferred_index=int(cam_index),
+                        preferred_source=cam_index,
                         init_s=max(0.0, camera_init_s * 0.5),
                         warmup_frames=max(1, camera_warmup_frames),
                         width=max(0, image_width),
@@ -385,7 +421,7 @@ def run_scan(
 
             try:
                 cap, cam_index, cam_backend = _discover_camera(
-                    preferred_index=camera_index,
+                    preferred_index=cam_index if cam_index is not None else camera_index,
                     probe_count=max(1, camera_probe_count),
                     init_s=max(0.0, camera_init_s),
                     warmup_frames=max(1, camera_warmup_frames),
@@ -485,24 +521,54 @@ def run_scan(
 
             ok, frame = _capture_fresh_frame()
 
+            recovery_error = None
             if not ok or frame is None:
-                progress_callback({
-                    'stage': 'capturing',
-                    'message': f'Camera read failed at step {idx + 1}; attempting camera recovery...',
-                })
-                _recover_camera()
-                if moved_since_last_capture and camera_post_move_wait > 0.0:
-                    if not _sleep_with_stop(camera_post_move_wait):
-                        return {
-                            'success': False,
-                            'stopped': True,
-                            'point_count': len(generated_files),
-                            'files': generated_files,
-                            'error': None,
-                            'message': 'Stopped during post-recovery camera wait',
-                            'scan_quality': {}
-                        }
-                ok, frame = _capture_fresh_frame()
+                for recovery_attempt in range(max(0, camera_step_retries) + 1):
+                    progress_callback({
+                        'stage': 'capturing',
+                        'message': (
+                            f'Camera read failed at step {idx + 1}; attempting recovery '
+                            f'({recovery_attempt + 1}/{max(0, camera_step_retries) + 1})...'
+                        ),
+                    })
+                    try:
+                        _recover_camera()
+                        if moved_since_last_capture and camera_post_move_wait > 0.0:
+                            if not _sleep_with_stop(camera_post_move_wait):
+                                return {
+                                    'success': False,
+                                    'stopped': True,
+                                    'point_count': len(generated_files),
+                                    'files': generated_files,
+                                    'error': None,
+                                    'message': 'Stopped during post-recovery camera wait',
+                                    'scan_quality': {}
+                                }
+
+                        ok, frame = _capture_fresh_frame()
+                        if ok and frame is not None:
+                            recovery_error = None
+                            break
+                        recovery_error = RuntimeError('Recovered camera but frame read still failed')
+                    except Exception as exc:
+                        recovery_error = exc
+
+                    if recovery_attempt < max(0, camera_step_retries):
+                        if not _sleep_with_stop(max(0.0, camera_step_retry_wait)):
+                            return {
+                                'success': False,
+                                'stopped': True,
+                                'point_count': len(generated_files),
+                                'files': generated_files,
+                                'error': None,
+                                'message': 'Stopped during camera retry wait',
+                                'scan_quality': {}
+                            }
+
+                if (not ok or frame is None) and recovery_error is not None:
+                    raise RuntimeError(
+                        f'Camera capture failed at panorama step {idx + 1} after recovery retries: {recovery_error}'
+                    )
 
             if not ok or frame is None:
                 raise RuntimeError(f'Camera capture failed at panorama step {idx + 1}')
