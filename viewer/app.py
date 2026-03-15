@@ -13,6 +13,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog
 import numpy as np
+import cv2
 import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
@@ -70,6 +71,8 @@ class RPLidarViewerApp:
         self.current_file = None
         self.current_pcd = None  # Store loaded point cloud
         self.point_size = config.POINT_SIZE
+        self.render_mode = "normal"
+        self.render_preview_file = os.path.join(config.DATA_DIR, "render_preview.ply")
         
     def initialize_gui(self):
         """Initialize the Open3D GUI window and widgets."""
@@ -253,6 +256,31 @@ class RPLidarViewerApp:
             self.point_size_slider.set_on_value_changed(self._on_point_size_changed)
             size_horiz.add_child(self.point_size_slider)
             viz_panel.add_child(size_horiz)
+
+            viz_panel.add_fixed(em * 0.5)
+
+            # Render mode selection (mutually exclusive)
+            mode_panel = gui.CollapsableVert("Render Mode", 0.25 * em, gui.Margins(em, 0, 0, 0))
+            mode_panel.set_is_open(True)
+            mode_container = gui.Vert(0.4 * em)
+
+            self.render_mode_normal_checkbox = gui.Checkbox("Normal (red points)")
+            self.render_mode_normal_checkbox.checked = True
+            self.render_mode_normal_checkbox.set_on_checked(self._on_render_mode_normal_checked)
+            mode_container.add_child(self.render_mode_normal_checkbox)
+
+            self.render_mode_panorama_checkbox = gui.Checkbox("Panorama-aware (RGB mapping)")
+            self.render_mode_panorama_checkbox.checked = False
+            self.render_mode_panorama_checkbox.set_on_checked(self._on_render_mode_panorama_checked)
+            mode_container.add_child(self.render_mode_panorama_checkbox)
+
+            self.render_mode_distance_checkbox = gui.Checkbox("Distance (gradient)")
+            self.render_mode_distance_checkbox.checked = False
+            self.render_mode_distance_checkbox.set_on_checked(self._on_render_mode_distance_checked)
+            mode_container.add_child(self.render_mode_distance_checkbox)
+
+            mode_panel.add_child(mode_container)
+            viz_panel.add_child(mode_panel)
             
             viz_panel.add_fixed(em * 0.5)
             
@@ -880,6 +908,183 @@ class RPLidarViewerApp:
         print(f"[DEBUG] Point size changed to: {value}")
         self.point_size = float(value)
         # Point size will be applied when visualize button is clicked
+
+    def _on_render_mode_normal_checked(self, checked: bool):
+        """Keep render mode selection mutually exclusive."""
+        if checked:
+            self.render_mode = "normal"
+            self.render_mode_panorama_checkbox.checked = False
+            self.render_mode_distance_checkbox.checked = False
+        elif not self.render_mode_panorama_checkbox.checked and not self.render_mode_distance_checkbox.checked:
+            self.render_mode_normal_checkbox.checked = True
+
+    def _on_render_mode_panorama_checked(self, checked: bool):
+        """Keep render mode selection mutually exclusive."""
+        if checked:
+            self.render_mode = "panorama"
+            self.render_mode_normal_checkbox.checked = False
+            self.render_mode_distance_checkbox.checked = False
+        elif not self.render_mode_normal_checkbox.checked and not self.render_mode_distance_checkbox.checked:
+            self.render_mode_panorama_checkbox.checked = True
+
+    def _on_render_mode_distance_checked(self, checked: bool):
+        """Keep render mode selection mutually exclusive."""
+        if checked:
+            self.render_mode = "distance"
+            self.render_mode_normal_checkbox.checked = False
+            self.render_mode_panorama_checkbox.checked = False
+        elif not self.render_mode_normal_checkbox.checked and not self.render_mode_panorama_checkbox.checked:
+            self.render_mode_distance_checkbox.checked = True
+
+    def _clone_current_pcd(self):
+        """Return a copy of the current point cloud for non-destructive render styling."""
+        pcd = o3d.geometry.PointCloud()
+        pts = np.asarray(self.current_pcd.points)
+        pcd.points = o3d.utility.Vector3dVector(np.array(pts, copy=True))
+        return pcd
+
+    def _apply_normal_colors(self, pcd: o3d.geometry.PointCloud):
+        """Apply default red coloring."""
+        pts = np.asarray(pcd.points)
+        colors = np.tile([1.0, 0.0, 0.0], (len(pts), 1))
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    def _apply_distance_colors(self, pcd: o3d.geometry.PointCloud):
+        """Color points by distance magnitude using a simple blue->red gradient."""
+        pts = np.asarray(pcd.points)
+        d = np.linalg.norm(pts, axis=1)
+        if d.size == 0:
+            return
+        d_min = float(np.min(d))
+        d_max = float(np.max(d))
+        span = max(1e-9, d_max - d_min)
+        t = (d - d_min) / span
+
+        colors = np.zeros((len(pts), 3), dtype=np.float64)
+        colors[:, 0] = t
+        colors[:, 1] = 1.0 - np.abs(t - 0.5) * 2.0
+        colors[:, 2] = 1.0 - t
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    def _choose_panorama_image(self):
+        """Resolve panorama image for panorama-aware rendering; prompt user if missing."""
+        if os.path.exists(self.panorama_last_output):
+            return self.panorama_last_output
+        if os.path.exists(config.PANORAMA_STITCHED_FILE):
+            return config.PANORAMA_STITCHED_FILE
+
+        selected = [None]
+
+        def ask_file():
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            initial_dir = config.PANORAMA_IMAGES_DIR if os.path.exists(config.PANORAMA_IMAGES_DIR) else config.DATA_DIR
+            filename = filedialog.askopenfilename(
+                parent=root,
+                title="Select Stitched Panorama Image",
+                initialdir=initial_dir,
+                filetypes=[
+                    ("Image files", "*.jpg *.jpeg *.png"),
+                    ("All files", "*.*")
+                ]
+            )
+            root.destroy()
+            selected[0] = filename
+
+        dialog_thread = threading.Thread(target=ask_file)
+        dialog_thread.start()
+        dialog_thread.join()
+        return selected[0]
+
+    def _estimate_panorama_yaw_offset_rad(self, points: np.ndarray, pano_img: np.ndarray) -> float:
+        """Estimate yaw offset by correlating cloud yaw occupancy and panorama edge energy."""
+        if points.shape[0] < 100 or pano_img is None:
+            return 0.0
+
+        gray = cv2.cvtColor(pano_img, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        edge_profile = np.mean(np.abs(edges), axis=0)
+        if np.max(edge_profile) <= 1e-6:
+            return 0.0
+        edge_profile = edge_profile / (np.max(edge_profile) + 1e-9)
+
+        yaw = np.arctan2(points[:, 1], points[:, 0])
+        bins = edge_profile.shape[0]
+        hist, _ = np.histogram(yaw, bins=bins, range=(-np.pi, np.pi))
+        hist = hist.astype(np.float64)
+        if np.max(hist) <= 0:
+            return 0.0
+        hist = hist / (np.max(hist) + 1e-9)
+
+        best_shift = 0
+        best_score = -1e18
+        for shift in range(bins):
+            shifted = np.roll(edge_profile, shift)
+            score = float(np.dot(hist, shifted))
+            if score > best_score:
+                best_score = score
+                best_shift = shift
+
+        return float((best_shift / bins) * (2.0 * np.pi))
+
+    def _apply_panorama_colors(self, pcd: o3d.geometry.PointCloud) -> bool:
+        """Apply panorama-aware RGB mapping to points with automatic yaw calibration."""
+        panorama_path = self._choose_panorama_image()
+        if not panorama_path:
+            self._update_viz_status("Panorama-aware mode requires a stitched panorama image")
+            return False
+
+        pano = cv2.imread(panorama_path)
+        if pano is None:
+            self._update_viz_status(f"Failed loading panorama image: {panorama_path}")
+            return False
+
+        self.panorama_last_output = panorama_path
+        h, w = pano.shape[:2]
+        pts = np.asarray(pcd.points)
+        if pts.size == 0:
+            return False
+
+        yaw = np.arctan2(pts[:, 1], pts[:, 0])
+        horiz = np.sqrt(pts[:, 0] ** 2 + pts[:, 1] ** 2)
+        pitch = np.arctan2(pts[:, 2], np.maximum(horiz, 1e-9))
+
+        yaw_offset = self._estimate_panorama_yaw_offset_rad(pts, pano)
+        yaw = (yaw + yaw_offset + np.pi) % (2.0 * np.pi) - np.pi
+
+        u = ((yaw + np.pi) / (2.0 * np.pi)) * (w - 1)
+        v = ((np.pi / 2.0 - pitch) / np.pi) * (h - 1)
+        u = np.mod(np.round(u).astype(np.int64), w)
+        v = np.clip(np.round(v).astype(np.int64), 0, h - 1)
+
+        sampled = pano[v, u, :].astype(np.float64) / 255.0
+        sampled = sampled[:, ::-1]  # BGR -> RGB
+        pcd.colors = o3d.utility.Vector3dVector(sampled)
+
+        self._update_viz_status("Panorama-aware coloring applied")
+        return True
+
+    def _build_render_pcd(self):
+        """Build point cloud styled according to selected render mode."""
+        pcd = self._clone_current_pcd()
+
+        if self.render_mode == "normal":
+            self._apply_normal_colors(pcd)
+            return pcd
+
+        if self.render_mode == "distance":
+            self._apply_distance_colors(pcd)
+            return pcd
+
+        if self.render_mode == "panorama":
+            ok = self._apply_panorama_colors(pcd)
+            if not ok:
+                return None
+            return pcd
+
+        self._apply_normal_colors(pcd)
+        return pcd
     
     def load_and_display_file(self, file_path: str):
         """Load a point cloud file."""
@@ -945,12 +1150,21 @@ class RPLidarViewerApp:
             return
         
         try:
+            render_pcd = self._build_render_pcd()
+            if render_pcd is None:
+                return
+
+            os.makedirs(os.path.dirname(self.render_preview_file), exist_ok=True)
+            if not o3d.io.write_point_cloud(self.render_preview_file, render_pcd):
+                self._update_viz_status("Error: failed to build render preview")
+                return
+
             # Launch standalone viewer as subprocess (prevents GLFW conflicts)
             viewer_script = os.path.join(os.path.dirname(__file__), 'standalone_viewer.py')
             python_exe = sys.executable
             
             # Build command
-            cmd = [python_exe, viewer_script, self.current_file, str(int(self.point_size))]
+            cmd = [python_exe, viewer_script, self.render_preview_file, str(int(self.point_size))]
             
             print(f"[DEBUG] Launching viewer subprocess: {' '.join(cmd)}")
             
