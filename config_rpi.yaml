@@ -70,6 +70,8 @@ panorama:
   # Webcam discovery/capture controls.
   # Use stable capture alias (index0 is video stream, index1 is metadata for this webcam).
   camera_index: /dev/v4l/by-id/usb-046d_081b_DDCCCA90-video-index0
+  # Second webcam facing opposite direction (must be explicit in dual-camera mode).
+  camera_secondary_index: /dev/v4l/by-id/usb-046d_081b_13D1CA90-video-index0
   camera_probe_count: 1
   camera_fast_reopen_only_attempts: 1
   camera_healthcheck_retries: 1

@@ -1,7 +1,8 @@
 """
 Panorama scan module.
 
-Captures one webcam frame per servo step and saves/transfers resulting images.
+Captures two webcam frames per servo step (front then rear) and saves/transfers
+the resulting panorama image set.
 """
 
 import os
@@ -12,12 +13,7 @@ from typing import Optional, Callable, Tuple, List
 
 from utils.port_config import get_default_servo_port
 from robust_3d_scan_module import PicoServoController, _is_io_error
-
-try:
-    import cv2
-except ImportError:
-    cv2 = None
-
+import cv2 
 
 DEFAULTS = {
     'start_deg': 0.0,
@@ -44,6 +40,7 @@ DEFAULTS = {
     'camera_healthcheck_wait': 0.15,
     'camera_strict_preferred_source': True,
     'camera_index': 'auto',
+    'camera_secondary_index': 'auto',
     'camera_allow_cap_any_fallback': False,
     'image_format': 'jpg',
     'image_quality': 90,
@@ -338,11 +335,7 @@ def run_scan(
     progress_callback: Optional[Callable] = None,
     file_callback: Optional[Callable] = None,
 ) -> dict:
-    """
-    Execute panorama capture (servo step + webcam frame per step).
-
-    Returns a result dict compatible with scanner service expectations.
-    """
+    """Execute dual-camera panorama capture (servo step + front/rear frames)."""
     if should_stop is None:
         should_stop = lambda: False
     if progress_callback is None:
@@ -386,6 +379,7 @@ def run_scan(
     )
     camera_probe_count = int(panorama_config.get('camera_probe_count', DEFAULTS['camera_probe_count']))
     camera_index = panorama_config.get('camera_index', DEFAULTS['camera_index'])
+    camera_secondary_index = panorama_config.get('camera_secondary_index', DEFAULTS['camera_secondary_index'])
     camera_allow_cap_any_fallback = bool(
         panorama_config.get('camera_allow_cap_any_fallback', DEFAULTS['camera_allow_cap_any_fallback'])
     )
@@ -443,9 +437,21 @@ def run_scan(
 
     generated_files = []
     servo = None
-    cap = None
-    cam_index = None
-    cam_backend = None
+
+    primary_cam = {
+        'label': 'front',
+        'cap': None,
+        'source': None,
+        'backend': None,
+        'configured_source': camera_index,
+    }
+    secondary_cam = {
+        'label': 'rear',
+        'cap': None,
+        'source': None,
+        'backend': None,
+        'configured_source': camera_secondary_index,
+    }
 
     # This tracks whether we should perform extra post-move warmup before capture.
     moved_since_last_capture = False
@@ -507,6 +513,10 @@ def run_scan(
                 if not _sleep_with_stop(servo_reconnect_delay):
                     raise RuntimeError('Stopped during servo recovery')
 
+    def _is_cam_open(cam: dict) -> bool:
+        cap = cam.get('cap')
+        return cap is not None and (not hasattr(cap, 'isOpened') or cap.isOpened())
+
     def _prepare_capture_window(step_idx: int, total_steps: int) -> bool:
         """Wait/flush/dwell after movement so capture uses a stable frame."""
         if moved_since_last_capture and camera_post_move_wait > 0.0:
@@ -521,7 +531,9 @@ def run_scan(
                     f'before capture step {step_idx + 1}/{total_steps}'
                 ),
             })
-            if not _flush_camera_stream(camera_post_move_flush_s):
+            primary_ok = _flush_camera_stream(primary_cam, camera_post_move_flush_s)
+            secondary_ok = _flush_camera_stream(secondary_cam, camera_post_move_flush_s)
+            if not (primary_ok and secondary_ok):
                 progress_callback({
                     'stage': 'capturing',
                     'message': (
@@ -536,9 +548,10 @@ def run_scan(
 
         return True
 
-    def _capture_fresh_frame() -> Tuple[bool, object]:
+    def _capture_fresh_frame(cam: dict) -> Tuple[bool, object]:
         """Capture a fresh frame by flushing buffered frames first."""
-        if cap is None or (hasattr(cap, 'isOpened') and not cap.isOpened()):
+        cap = cam.get('cap')
+        if not _is_cam_open(cam):
             return False, None
 
         for _ in range(max(0, camera_flush_frames)):
@@ -556,9 +569,10 @@ def run_scan(
             time.sleep(0.05)
         return ok, frame
 
-    def _camera_health_check() -> bool:
+    def _camera_health_check(cam: dict) -> bool:
         """Fast per-step camera check without a full recovery cycle."""
-        if cap is None or (hasattr(cap, 'isOpened') and not cap.isOpened()):
+        cap = cam.get('cap')
+        if not _is_cam_open(cam):
             return False
 
         try:
@@ -567,11 +581,12 @@ def run_scan(
         except Exception:
             return False
 
-    def _flush_camera_stream(duration_s: float) -> bool:
+    def _flush_camera_stream(cam: dict, duration_s: float) -> bool:
         """Drain camera frames for a short duration after servo movement."""
         if duration_s <= 0.0:
             return True
-        if cap is None or (hasattr(cap, 'isOpened') and not cap.isOpened()):
+        cap = cam.get('cap')
+        if not _is_cam_open(cam):
             return False
 
         end_at = time.time() + duration_s
@@ -585,39 +600,41 @@ def run_scan(
             time.sleep(0.01)
         return True
 
-    def _recover_camera(fast_only: bool = False) -> Tuple[object, object, str]:
+    def _recover_camera(cam: dict, fast_only: bool = False) -> Tuple[object, object, str]:
         """Recover from camera disconnects with optional fast-path-only reopen."""
-        nonlocal cap, cam_index, cam_backend
-
         last_exc = None
         for attempt in range(camera_reopen_retries + 1):
             try:
-                if cap is not None:
-                    cap.release()
+                if cam.get('cap') is not None:
+                    cam['cap'].release()
             except Exception:
                 pass
-            cap = None
+            cam['cap'] = None
 
             try:
-                if cam_index is not None:
-                    cap, cam_index, cam_backend = _open_preferred_camera(
-                        preferred_source=cam_index,
+                if cam.get('source') is not None:
+                    cap_obj, src_obj, backend_name = _open_preferred_camera(
+                        preferred_source=cam['source'],
                         init_s=max(0.0, camera_init_s * 0.5),
                         warmup_frames=max(1, camera_warmup_frames),
                         width=max(0, image_width),
                         height=max(0, image_height),
                         allow_cap_any_fallback=camera_allow_cap_any_fallback,
                     )
+                    cam['cap'] = cap_obj
+                    cam['source'] = src_obj
+                    cam['backend'] = backend_name
                 else:
                     raise RuntimeError('No previous camera index to reopen')
-                return cap, cam_index, cam_backend
+                return cam['cap'], cam['source'], cam['backend']
             except Exception as exc:
                 last_exc = exc
 
             if not fast_only:
                 try:
-                    cap, cam_index, cam_backend = _discover_camera(
-                        preferred_index=cam_index if cam_index is not None else camera_index,
+                    preferred = cam.get('source') if cam.get('source') is not None else cam.get('configured_source')
+                    cap_obj, src_obj, backend_name = _discover_camera(
+                        preferred_index=preferred,
                         probe_count=max(1, camera_probe_count),
                         init_s=max(0.0, camera_init_s),
                         warmup_frames=max(1, camera_warmup_frames),
@@ -626,7 +643,10 @@ def run_scan(
                         allow_cap_any_fallback=camera_allow_cap_any_fallback,
                         strict_preferred_source=camera_strict_preferred_source,
                     )
-                    return cap, cam_index, cam_backend
+                    cam['cap'] = cap_obj
+                    cam['source'] = src_obj
+                    cam['backend'] = backend_name
+                    return cam['cap'], cam['source'], cam['backend']
                 except Exception as exc:
                     last_exc = exc
 
@@ -639,14 +659,17 @@ def run_scan(
         raise RuntimeError('Camera recovery failed')
 
     try:
-        progress_callback({'stage': 'init', 'message': 'Initializing panorama servo and webcam...'})
+        progress_callback({'stage': 'init', 'message': 'Initializing panorama servo and dual webcams...'})
+
+        if str(camera_secondary_index).strip().lower() == 'auto':
+            raise RuntimeError('panorama.camera_secondary_index must be set to explicit second camera source')
 
         servo = _connect_servo_controller()
         progress_callback({
             'stage': 'init',
             'message': (
                 f'Panorama sweep resolved to {start_deg:.1f}..{end_deg:.1f} deg '
-                f'in {step_deg:.1f} deg steps ({len(angles)} captures)'
+                f'in {step_deg:.1f} deg steps ({len(angles)} servo positions, {len(angles) * 2} images)'
             ),
         })
         progress_callback({'stage': 'init', 'message': f'Homing servo to {start_deg:.1f} deg'})
@@ -663,7 +686,7 @@ def run_scan(
                 'scan_quality': {}
             }
 
-        cap, cam_index, cam_backend = _discover_camera(
+        cap_obj, src_obj, backend_name = _discover_camera(
             preferred_index=camera_index,
             probe_count=max(1, camera_probe_count),
             init_s=max(0.0, camera_init_s),
@@ -673,9 +696,30 @@ def run_scan(
             allow_cap_any_fallback=camera_allow_cap_any_fallback,
             strict_preferred_source=camera_strict_preferred_source,
         )
+        primary_cam['cap'] = cap_obj
+        primary_cam['source'] = src_obj
+        primary_cam['backend'] = backend_name
+
+        cap_obj, src_obj, backend_name = _discover_camera(
+            preferred_index=camera_secondary_index,
+            probe_count=max(1, camera_probe_count),
+            init_s=max(0.0, camera_init_s),
+            warmup_frames=max(1, camera_warmup_frames),
+            width=max(0, image_width),
+            height=max(0, image_height),
+            allow_cap_any_fallback=camera_allow_cap_any_fallback,
+            strict_preferred_source=camera_strict_preferred_source,
+        )
+        secondary_cam['cap'] = cap_obj
+        secondary_cam['source'] = src_obj
+        secondary_cam['backend'] = backend_name
+
         progress_callback({
             'stage': 'init',
-            'message': f'Webcam ready on source {cam_index} ({cam_backend})',
+            'message': (
+                f"Webcams ready: front={primary_cam['source']} ({primary_cam['backend']}), "
+                f"rear={secondary_cam['source']} ({secondary_cam['backend']})"
+            ),
         })
 
         for idx, angle in enumerate(angles):
@@ -690,20 +734,23 @@ def run_scan(
                     'scan_quality': {}
                 }
 
-            if not _camera_health_check():
+            for cam in (primary_cam, secondary_cam):
+                if _camera_health_check(cam):
+                    continue
+
                 recovered = False
                 for health_attempt in range(max(0, camera_healthcheck_retries) + 1):
                     progress_callback({
                         'stage': 'capturing',
                         'message': (
-                            f'Camera health check failed before step {idx + 1}; '
-                            f'attempting recovery ({health_attempt + 1}/{max(0, camera_healthcheck_retries) + 1})...'
+                            f"{cam['label']} camera health check failed before step {idx + 1}; "
+                            f"attempting recovery ({health_attempt + 1}/{max(0, camera_healthcheck_retries) + 1})..."
                         ),
                     })
                     try:
                         fast_only = health_attempt < max(0, camera_fast_reopen_only_attempts)
-                        _recover_camera(fast_only=fast_only)
-                        if _camera_health_check():
+                        _recover_camera(cam, fast_only=fast_only)
+                        if _camera_health_check(cam):
                             recovered = True
                             break
                     except Exception:
@@ -722,7 +769,9 @@ def run_scan(
                             }
 
                 if not recovered:
-                    raise RuntimeError(f'Camera unavailable before panorama step {idx + 1}')
+                    raise RuntimeError(
+                        f"{cam['label']} camera unavailable before panorama step {idx + 1}"
+                    )
 
             if idx > 0:
                 progress_callback({
@@ -753,96 +802,102 @@ def run_scan(
                     'scan_quality': {}
                 }
 
-            ok, frame = _capture_fresh_frame()
-
-            recovery_error = None
-            if not ok or frame is None:
-                for recovery_attempt in range(max(0, camera_step_retries) + 1):
-                    progress_callback({
-                        'stage': 'capturing',
-                        'message': (
-                            f'Camera read failed at step {idx + 1}; attempting recovery '
-                            f'({recovery_attempt + 1}/{max(0, camera_step_retries) + 1})...'
-                        ),
-                    })
-                    try:
-                        fast_only = recovery_attempt < max(0, camera_fast_reopen_only_attempts)
-                        _recover_camera(fast_only=fast_only)
-
-                        progress_callback({
-                            'stage': 'capturing',
-                            'message': f'Re-syncing servo to {angle:.1f} deg after camera recovery',
-                        })
-                        _move_with_recovery(angle)
-                        moved_since_last_capture = True
-                        if step_settle_s > 0.0 and not _sleep_with_stop(step_settle_s):
-                            return {
-                                'success': False,
-                                'stopped': True,
-                                'point_count': len(generated_files),
-                                'files': generated_files,
-                                'error': None,
-                                'message': 'Stopped during post-recovery servo settle',
-                                'scan_quality': {}
-                            }
-
-                        if not _prepare_capture_window(idx, len(angles)):
-                            return {
-                                'success': False,
-                                'stopped': True,
-                                'point_count': len(generated_files),
-                                'files': generated_files,
-                                'error': None,
-                                'message': 'Stopped while preparing post-recovery capture window',
-                                'scan_quality': {}
-                            }
-
-                        ok, frame = _capture_fresh_frame()
-                        if ok and frame is not None:
-                            recovery_error = None
-                            break
-                        recovery_error = RuntimeError('Recovered camera but frame read still failed')
-                    except Exception as exc:
-                        recovery_error = exc
-
-                    if recovery_attempt < max(0, camera_step_retries):
-                        if not _sleep_with_stop(max(0.0, camera_step_retry_wait)):
-                            return {
-                                'success': False,
-                                'stopped': True,
-                                'point_count': len(generated_files),
-                                'files': generated_files,
-                                'error': None,
-                                'message': 'Stopped during camera retry wait',
-                                'scan_quality': {}
-                            }
-
-                if (not ok or frame is None) and recovery_error is not None:
-                    raise RuntimeError(
-                        f'Camera capture failed at panorama step {idx + 1} after recovery retries: {recovery_error}'
-                    )
-
-            if not ok or frame is None:
-                raise RuntimeError(f'Camera capture failed at panorama step {idx + 1}')
-
-            image_name = f'panorama_{idx:02d}.{image_fmt}'
-            image_path = os.path.join(images_dir, image_name)
-
             if image_fmt in ('jpg', 'jpeg'):
                 params = [int(getattr(cv2, 'IMWRITE_JPEG_QUALITY', 1)), max(1, min(100, image_quality))]
             else:
                 params = []
 
-            written = cv2.imwrite(image_path, frame, params)
-            if not written:
-                raise RuntimeError(f'Failed writing image: {image_path}')
+            for cam_slot, cam in enumerate((primary_cam, secondary_cam)):
+                ok, frame = _capture_fresh_frame(cam)
 
-            generated_files.append(image_path)
+                recovery_error = None
+                if not ok or frame is None:
+                    for recovery_attempt in range(max(0, camera_step_retries) + 1):
+                        progress_callback({
+                            'stage': 'capturing',
+                            'message': (
+                                f"{cam['label']} camera read failed at step {idx + 1}; attempting recovery "
+                                f"({recovery_attempt + 1}/{max(0, camera_step_retries) + 1})..."
+                            ),
+                        })
+                        try:
+                            fast_only = recovery_attempt < max(0, camera_fast_reopen_only_attempts)
+                            _recover_camera(cam, fast_only=fast_only)
+
+                            progress_callback({
+                                'stage': 'capturing',
+                                'message': f'Re-syncing servo to {angle:.1f} deg after camera recovery',
+                            })
+                            _move_with_recovery(angle)
+                            moved_since_last_capture = True
+                            if step_settle_s > 0.0 and not _sleep_with_stop(step_settle_s):
+                                return {
+                                    'success': False,
+                                    'stopped': True,
+                                    'point_count': len(generated_files),
+                                    'files': generated_files,
+                                    'error': None,
+                                    'message': 'Stopped during post-recovery servo settle',
+                                    'scan_quality': {}
+                                }
+
+                            if not _prepare_capture_window(idx, len(angles)):
+                                return {
+                                    'success': False,
+                                    'stopped': True,
+                                    'point_count': len(generated_files),
+                                    'files': generated_files,
+                                    'error': None,
+                                    'message': 'Stopped while preparing post-recovery capture window',
+                                    'scan_quality': {}
+                                }
+
+                            ok, frame = _capture_fresh_frame(cam)
+                            if ok and frame is not None:
+                                recovery_error = None
+                                break
+                            recovery_error = RuntimeError('Recovered camera but frame read still failed')
+                        except Exception as exc:
+                            recovery_error = exc
+
+                        if recovery_attempt < max(0, camera_step_retries):
+                            if not _sleep_with_stop(max(0.0, camera_step_retry_wait)):
+                                return {
+                                    'success': False,
+                                    'stopped': True,
+                                    'point_count': len(generated_files),
+                                    'files': generated_files,
+                                    'error': None,
+                                    'message': 'Stopped during camera retry wait',
+                                    'scan_quality': {}
+                                }
+
+                    if (not ok or frame is None) and recovery_error is not None:
+                        raise RuntimeError(
+                            f"{cam['label']} camera capture failed at panorama step {idx + 1} after recovery retries: {recovery_error}"
+                        )
+
+                if not ok or frame is None:
+                    raise RuntimeError(f"{cam['label']} camera capture failed at panorama step {idx + 1}")
+
+                image_idx = idx if cam_slot == 0 else idx + len(angles)
+                image_name = f'panorama_{image_idx:02d}.{image_fmt}'
+                image_path = os.path.join(images_dir, image_name)
+
+                written = cv2.imwrite(image_path, frame, params)
+                if not written:
+                    raise RuntimeError(f'Failed writing image: {image_path}')
+
+                generated_files.append(image_path)
+                file_callback(image_path)
+
             moved_since_last_capture = False
-            file_callback(image_path)
             progress_callback({
                 'stage': 'capturing',
-                'message': f'Captured panorama image {idx + 1}/{len(angles)} at {angle:.1f} deg',
+                'message': (
+                    f'Captured panorama image pair for step {idx + 1}/{len(angles)} '
+                    f'at {angle:.1f} deg'
+                ),
                 'point_count': len(generated_files),
             })
 
@@ -854,9 +909,12 @@ def run_scan(
             'error': None,
             'message': f'Panorama capture completed ({len(generated_files)} images)',
             'scan_quality': {
-                'camera_index': cam_index,
-                'camera_backend': cam_backend,
+                'camera_index_front': primary_cam['source'],
+                'camera_backend_front': primary_cam['backend'],
+                'camera_index_rear': secondary_cam['source'],
+                'camera_backend_rear': secondary_cam['backend'],
                 'images_captured': len(generated_files),
+                'images_per_camera': len(angles),
                 'start_deg': start_deg,
                 'end_deg': end_deg,
                 'step_deg': step_deg,
@@ -875,8 +933,10 @@ def run_scan(
         }
     finally:
         try:
-            if cap is not None:
-                cap.release()
+            if primary_cam.get('cap') is not None:
+                primary_cam['cap'].release()
+            if secondary_cam.get('cap') is not None:
+                secondary_cam['cap'].release()
         except Exception:
             pass
         try:

@@ -301,7 +301,7 @@ class RPLidarViewerApp:
             f"Resolution: {config.PANORAMA_CAMERA_WIDTH}x{config.PANORAMA_CAMERA_HEIGHT}\n"
             f"Sweep: {config.PANORAMA_CAPTURE_START_DEG}-{config.PANORAMA_CAPTURE_END_DEG} deg in "
             f"{config.PANORAMA_CAPTURE_STEP_DEG} deg steps "
-            f"({config.PANORAMA_EXPECTED_IMAGE_COUNT} images expected)"
+            f"(dual-camera set: {config.PANORAMA_EXPECTED_IMAGE_COUNT} images expected)"
         )
         self.panorama_info_label = gui.Label(profile_text)
         profile_panel.add_child(self.panorama_info_label)
