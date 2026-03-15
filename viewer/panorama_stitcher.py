@@ -37,20 +37,31 @@ def _extract_panorama_index(path: str):
 
 def _effective_yaw_deg(
     index: int,
+    images_per_camera: int,
     front_yaw_offset_deg: float,
     step_deg: float,
     rear_relative_yaw_deg: float,
 ) -> float:
     """Map dual-camera image index to effective yaw around 360 degrees.
 
-    Expected mapping with 0..150 servo sweep at 30-degree steps:
-    - 00..05: front camera -> 0,30,60,90,120,150
-    - 06..11: rear camera  -> 180,210,240,270,300,330
+    Index layout is front captures first, then rear captures:
+    - 00..(N-1): front camera
+    - N..(2N-1): rear camera
     """
-    if 0 <= index <= 5:
+    if images_per_camera <= 0:
+        return float(index)
+
+    if 0 <= index < images_per_camera:
         return float((front_yaw_offset_deg + (index * step_deg)) % 360.0)
-    if 6 <= index <= 11:
-        return float((front_yaw_offset_deg + rear_relative_yaw_deg + ((index - 6) * step_deg)) % 360.0)
+    if images_per_camera <= index < (2 * images_per_camera):
+        return float(
+            (
+                front_yaw_offset_deg
+                + rear_relative_yaw_deg
+                + ((index - images_per_camera) * step_deg)
+            )
+            % 360.0
+        )
     # Fallback keeps ordering stable if indices extend beyond current dual-camera convention.
     return float(index)
 
@@ -74,10 +85,18 @@ def order_dual_camera_panorama_images(
     if not indexed:
         return image_paths
 
+    max_idx = max(idx for idx, _ in indexed)
+    slot_count = max_idx + 1
+    if slot_count % 2 == 0:
+        images_per_camera = slot_count // 2
+    else:
+        images_per_camera = max(1, len(indexed) // 2)
+
     indexed.sort(
         key=lambda t: (
             _effective_yaw_deg(
                 t[0],
+                images_per_camera=images_per_camera,
                 front_yaw_offset_deg=front_yaw_offset_deg,
                 step_deg=step_deg,
                 rear_relative_yaw_deg=rear_relative_yaw_deg,

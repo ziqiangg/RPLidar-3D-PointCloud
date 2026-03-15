@@ -17,10 +17,10 @@ import cv2
 
 DEFAULTS = {
     'start_deg': 0.0,
-    'end_deg': 150.0,
-    'step_deg': 30.0,
+    'end_deg': 160.0,
+    'step_deg': 20.0,
     'inherit_scan3d_sweep': True,
-    'max_panorama_deg': 150.0,
+    'max_panorama_deg': 160.0,
     'home_settle_time': 1.5,
     'step_settle_time': 1.0,
     'step_dwell_time': 0.35,

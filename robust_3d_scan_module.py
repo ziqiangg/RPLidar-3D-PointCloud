@@ -31,7 +31,7 @@ DEFAULTS = {
     'servo_settle_time': 0.5,
     'sweep_start': 0,
     'sweep_end': 180,
-    'num_steps': 20,
+    'num_steps': 91,
     'max_scans': 40,
     'min_scans': 10,
     'plateau_iters': 5,

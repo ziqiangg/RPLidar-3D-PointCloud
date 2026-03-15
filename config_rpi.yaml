@@ -25,10 +25,10 @@ servo:
   settle_time: 0.5             # Wait time after "DONE" before scan starts
 
 scan3d:
-  # 3D scan configuration (9 steps × 20° physical = 180° sweep)
+  # 3D scan configuration (91 inclusive steps across 0..180 = 2° spacing)
   sweep_start: 0
   sweep_end: 180
-  num_steps: 37         # Total number of servo steps
+  num_steps: 91         # Total number of servo angles (includes 0 and 180)
   # Per-slice scan quality parameters (optimized for maximum coverage)
   min_angle_resolution: 1.0  # 1-degree bins for finer resolution
   min_coverage: 0.70  # Target 70% coverage (252° of 360°)
@@ -55,10 +55,10 @@ scan3d:
 panorama:
   # Inherit robust_3d sweep bounds by default, then clamp panorama to max_panorama_deg.
   inherit_scan3d_sweep: true
-  max_panorama_deg: 150
+  max_panorama_deg: 160
   start_deg: 0
-  end_deg: 150
-  step_deg: 30
+  end_deg: 160
+  step_deg: 20
   # Servo timing profile for stable 30-degree jumps.
   home_settle_time: 1.5
   step_settle_time: 1.0
