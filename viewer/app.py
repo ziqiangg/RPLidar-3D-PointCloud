@@ -546,6 +546,9 @@ class RPLidarViewerApp:
         ok, message, output_path = stitch_equirectangular_panorama(
             image_paths=image_paths,
             output_path=config.PANORAMA_STITCHED_FILE,
+            front_yaw_offset_deg=float(config.PANORAMA_FRONT_YAW_OFFSET_DEG),
+            step_deg=float(config.PANORAMA_CAPTURE_STEP_DEG),
+            rear_relative_yaw_deg=float(config.PANORAMA_REAR_RELATIVE_YAW_DEG),
         )
         if not ok:
             self._update_panorama_status(f"Stitch failed: {message}")

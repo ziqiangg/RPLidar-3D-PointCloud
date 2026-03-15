@@ -31,6 +31,10 @@ PANORAMA_EXPECTED_IMAGE_COUNT = 12
 PANORAMA_CAMERA_DIAGONAL_FOV_DEG = 55
 PANORAMA_CAMERA_WIDTH = 1280
 PANORAMA_CAMERA_HEIGHT = 720
+# Axis alignment for dual-camera panorama ordering versus LiDAR frame.
+# Front camera image 00 points toward -Y by default => -90 deg offset from +X reference.
+PANORAMA_FRONT_YAW_OFFSET_DEG = -90.0
+PANORAMA_REAR_RELATIVE_YAW_DEG = 180.0
 
 # Visualization Settings
 POINT_SIZE = 2.0
