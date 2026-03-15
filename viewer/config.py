@@ -36,6 +36,11 @@ PANORAMA_CAMERA_HEIGHT = 720
 PANORAMA_FRONT_YAW_OFFSET_DEG = -90.0
 PANORAMA_REAR_RELATIVE_YAW_DEG = 180.0
 
+# Panorama-aware point-colorization controls.
+# Set AUTO_YAW to False for deterministic trial-and-error tuning via YAW_OFFSET_DEG.
+PANORAMA_COLORIZE_AUTO_YAW = False
+PANORAMA_COLORIZE_YAW_OFFSET_DEG = 60.0
+
 # Visualization Settings
 POINT_SIZE = 2.0
 BACKGROUND_COLOR = [0.1, 0.1, 0.1, 1.0]  # Dark gray (RGBA)

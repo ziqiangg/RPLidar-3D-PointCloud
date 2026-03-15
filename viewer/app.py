@@ -1009,7 +1009,8 @@ class RPLidarViewerApp:
             return 0.0
         edge_profile = edge_profile / (np.max(edge_profile) + 1e-9)
 
-        yaw = np.arctan2(points[:, 1], points[:, 0])
+        # Robust cloud uses x/z as horizontal plane and y as elevation.
+        yaw = np.arctan2(points[:, 2], points[:, 0])
         bins = edge_profile.shape[0]
         hist, _ = np.histogram(yaw, bins=bins, range=(-np.pi, np.pi))
         hist = hist.astype(np.float64)
@@ -1046,11 +1047,14 @@ class RPLidarViewerApp:
         if pts.size == 0:
             return False
 
-        yaw = np.arctan2(pts[:, 1], pts[:, 0])
-        horiz = np.sqrt(pts[:, 0] ** 2 + pts[:, 1] ** 2)
-        pitch = np.arctan2(pts[:, 2], np.maximum(horiz, 1e-9))
+        # Project with x/z as azimuth plane and y as vertical axis.
+        yaw = np.arctan2(pts[:, 2], pts[:, 0])
+        horiz = np.sqrt(pts[:, 0] ** 2 + pts[:, 2] ** 2)
+        pitch = np.arctan2(pts[:, 1], np.maximum(horiz, 1e-9))
 
-        yaw_offset = self._estimate_panorama_yaw_offset_rad(pts, pano)
+        yaw_offset = np.deg2rad(float(config.PANORAMA_COLORIZE_YAW_OFFSET_DEG))
+        if bool(getattr(config, "PANORAMA_COLORIZE_AUTO_YAW", False)):
+            yaw_offset += self._estimate_panorama_yaw_offset_rad(pts, pano)
         yaw = (yaw + yaw_offset + np.pi) % (2.0 * np.pi) - np.pi
 
         u = ((yaw + np.pi) / (2.0 * np.pi)) * (w - 1)
@@ -1060,9 +1064,12 @@ class RPLidarViewerApp:
 
         sampled = pano[v, u, :].astype(np.float64) / 255.0
         sampled = sampled[:, ::-1]  # BGR -> RGB
+
         pcd.colors = o3d.utility.Vector3dVector(sampled)
 
-        self._update_viz_status("Panorama-aware coloring applied")
+        self._update_viz_status(
+            f"Panorama-aware coloring applied (yaw_offset_deg={np.rad2deg(yaw_offset):.1f})"
+        )
         return True
 
     def _build_render_pcd(self):
