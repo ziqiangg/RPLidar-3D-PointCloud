@@ -16,7 +16,7 @@ POLICIES = {
     },
     "PANORAMA": {
         "min_angle": 0,
-        "max_angle": 150,
+        "max_angle": 160,
     },
 }
 active_policy = "ROBUST_3D"

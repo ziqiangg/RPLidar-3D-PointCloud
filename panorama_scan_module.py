@@ -493,7 +493,10 @@ def run_scan(
                 ack = float(getattr(servo, 'current_angle', requested))
                 if abs(ack - requested) > max(0.0, servo_angle_tolerance_deg):
                     raise RuntimeError(
-                        f'Servo ACK mismatch (requested={requested:.1f}, ack={ack:.1f})'
+                        (
+                            f'Servo ACK mismatch (requested={requested:.1f}, ack={ack:.1f}). '
+                            'Check Pico PANORAMA policy max_angle clamp.'
+                        )
                     )
                 return ack
             except Exception as exc:
