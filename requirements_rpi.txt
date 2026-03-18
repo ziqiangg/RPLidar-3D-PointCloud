@@ -1,5 +1,5 @@
 # Raspberry Pi Requirements
-# Minimal dependencies for scanner service only
+# Scanner service plus optional CPU RandLA-Net inference runtime.
 
 # RPLidar communication
 rplidar-roboticia
@@ -14,7 +14,8 @@ paho-mqtt
 pyyaml
 
 # Numerical operations
-numpy
+# Pin below NumPy 2 because the tested torch/open3d stack still expects the 1.x ABI.
+numpy<2
 
 # Webcam capture for panorama mode
 opencv-python-headless
@@ -22,3 +23,10 @@ opencv-python-headless
 # Servo control (Raspberry Pi)
 gpiozero
 lgpio
+
+# Optional post-scan segmentation runtime (used when config.segmentation.enabled=true)
+# Keep this separate from notebook-only packages: no jupyterlab/ipykernel/plotly here.
+--extra-index-url https://download.pytorch.org/whl/cpu/
+torch>=2.2,<2.3
+open3d==0.19.0
+tensorboard

@@ -246,6 +246,66 @@ class RPiScannerService(MQTTClientBase):
         """Load configuration from YAML file."""
         with open(config_path, 'r') as f:
             return yaml.safe_load(f)
+
+    def _run_segmentation_inference(self, scan_id: str, scan_result: dict, data_dir: str) -> dict:
+        """Run optional post-scan segmentation on the stitched robust scan."""
+        seg_cfg = self.config.get('segmentation', {}) or {}
+        if not bool(seg_cfg.get('enabled', False)):
+            return {'success': False, 'skipped': True, 'reason': 'disabled'}
+
+        stitched_ply = None
+        for file_path in scan_result.get('files', []):
+            if os.path.basename(file_path) == 'robust_scan_full.ply':
+                stitched_ply = file_path
+                break
+        if stitched_ply is None:
+            candidate = os.path.join(data_dir, 'robust_scan_full.ply')
+            if os.path.exists(candidate):
+                stitched_ply = candidate
+
+        if stitched_ply is None or not os.path.exists(stitched_ply):
+            return {
+                'success': False,
+                'skipped': True,
+                'reason': 'stitched_ply_missing',
+            }
+
+        checkpoint_cfg = seg_cfg.get(
+            'checkpoint',
+            os.path.join('segmentation', 'Randlanet S3DIS Jan 7 2022.pth'),
+        )
+        checkpoint_path = checkpoint_cfg
+        if not os.path.isabs(checkpoint_path):
+            checkpoint_path = os.path.abspath(os.path.join(os.path.dirname(__file__), checkpoint_path))
+
+        output_dir = seg_cfg.get('output_dir')
+        if output_dir:
+            if not os.path.isabs(output_dir):
+                output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), output_dir))
+        else:
+            output_dir = os.path.join(data_dir, 'randla_inference_output')
+
+        grid_size = float(seg_cfg.get('grid_size', 0.01))
+        num_points = int(seg_cfg.get('num_points', 4096))
+        axis_remap = bool(seg_cfg.get('axis_remap', True))
+
+        self._publish_started_status(scan_id, 'Running RandLA-Net inference on stitched scan...')
+        self.logger.info(
+            f"Starting segmentation on {stitched_ply} "
+            f"(ckpt={checkpoint_path}, grid_size={grid_size}, num_points={num_points})"
+        )
+
+        from segmentation.run_randla_inference import run_inference
+
+        return run_inference(
+            scan_path=stitched_ply,
+            checkpoint=checkpoint_path,
+            output_dir=output_dir,
+            grid_size=grid_size,
+            num_points=num_points,
+            axis_remap=axis_remap,
+            verbose=False,
+        )
     
     def _setup_logging(self):
         """Setup logging configuration."""
@@ -749,6 +809,29 @@ class RPiScannerService(MQTTClientBase):
                         f"avg coverage {quality.get('avg_slice_coverage_percent', 0):.1f}%, "
                         f"reset_completed={quality.get('reset_completed', False)}"
                     )
+
+                if scan_type in ("3d", "robust_3d"):
+                    try:
+                        seg_result = self._run_segmentation_inference(scan_id, result, data_dir)
+                        result['segmentation'] = seg_result
+                        if seg_result.get('success'):
+                            seg_files = seg_result.get('files', [])
+                            if seg_files:
+                                result['files'] = list(result.get('files', [])) + seg_files
+                            self.logger.info(
+                                f"Segmentation completed: {len(seg_result.get('files', []))} output file(s)"
+                            )
+                        elif not seg_result.get('skipped'):
+                            self.logger.warning(
+                                f"Segmentation failed after scan completion: {seg_result.get('error', 'unknown error')}"
+                            )
+                    except Exception as e:
+                        self.logger.error(f"Segmentation hook failed: {e}")
+                        self.logger.error(traceback.format_exc())
+                        result['segmentation'] = {
+                            'success': False,
+                            'error': str(e),
+                        }
             else:
                 self.logger.error(f"{scan_type} scan failed: {result.get('error')}")
 
@@ -828,7 +911,7 @@ class RPiScannerService(MQTTClientBase):
             for file_path in files:
                 _, ext = os.path.splitext(file_path)
                 ext = ext.lower()
-                if ext in ('.csv', '.ply', '.jpg', '.jpeg', '.png'):
+                if ext in ('.csv', '.ply', '.jpg', '.jpeg', '.png', '.json', '.npz'):
                     file_format = ext.lstrip('.')
                 else:
                     file_format = 'bin'
