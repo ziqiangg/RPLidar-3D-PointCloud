@@ -96,3 +96,11 @@ panorama:
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR
   file: "./rpi_scanner.log"
+
+segmentation:
+  enabled: true
+  checkpoint: "segmentation/Randlanet S3DIS Jan 7 2022.pth"
+  output_dir: "./data/randla_inference_output"
+  grid_size: 0.01
+  num_points: 4096
+  axis_remap: true
