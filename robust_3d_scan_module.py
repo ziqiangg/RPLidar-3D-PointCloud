@@ -32,6 +32,9 @@ DEFAULTS = {
     'sweep_start': 0,
     'sweep_end': 180,
     'num_steps': 91,
+    'park_after_scan': True,
+    'park_backoff_deg': 5.0,
+    'park_settle_time': 0.25,
     'max_scans': 40,
     'min_scans': 10,
     'plateau_iters': 5,
@@ -476,6 +479,9 @@ def run_scan(
     sweep_start = float(scan_config.get('sweep_start', DEFAULTS['sweep_start']))
     sweep_end = float(scan_config.get('sweep_end', DEFAULTS['sweep_end']))
     num_steps = int(scan_config.get('num_steps', DEFAULTS['num_steps']))
+    park_after_scan = bool(scan_config.get('park_after_scan', DEFAULTS['park_after_scan']))
+    park_backoff_deg = abs(float(scan_config.get('park_backoff_deg', DEFAULTS['park_backoff_deg'])))
+    park_settle_time = float(scan_config.get('park_settle_time', DEFAULTS['park_settle_time']))
     
     # Robust Capture Config
     capture_config = {
@@ -494,6 +500,8 @@ def run_scan(
     all_points_3d = []
     generated_files = []
     save_slice_files = bool(scan_config.get('save_slice_files', False))
+    last_servo_angle: Optional[float] = None
+    steps = np.linspace(sweep_start, sweep_end, num_steps)
     
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -514,8 +522,6 @@ def run_scan(
             spinup_s=3.0,
         )
         
-        steps = np.linspace(sweep_start, sweep_end, num_steps)
-        
         for i, servo_angle in enumerate(steps):
             if should_stop():
                 break
@@ -530,6 +536,7 @@ def run_scan(
             
             # Move Servo (will wait for DONE response)
             servo.set_angle(servo_angle)
+            last_servo_angle = float(servo_angle)
             
             # Settle time after movement
             time.sleep(servo_settle)
@@ -714,6 +721,41 @@ def run_scan(
             'scan_quality': {}
         }
     finally:
+        if (
+            servo
+            and park_after_scan
+            and last_servo_angle is not None
+            and park_backoff_deg > 0.0
+            and len(steps) >= 1
+        ):
+            try:
+                lower = min(sweep_start, sweep_end)
+                upper = max(sweep_start, sweep_end)
+                direction = 0.0
+                if len(steps) >= 2:
+                    direction = float(steps[-1] - steps[0])
+
+                if direction > 0.0:
+                    park_target = max(lower, min(upper, last_servo_angle - park_backoff_deg))
+                elif direction < 0.0:
+                    park_target = max(lower, min(upper, last_servo_angle + park_backoff_deg))
+                else:
+                    park_target = last_servo_angle
+
+                if abs(park_target - last_servo_angle) > 1e-6:
+                    progress_callback({
+                        'stage': 'parking',
+                        'message': (
+                            f'Parking servo at {park_target:.1f}° '
+                            f'({park_backoff_deg:.1f}° backoff from scan endpoint)'
+                        ),
+                    })
+                    servo.set_angle(park_target)
+                    if park_settle_time > 0.0:
+                        time.sleep(park_settle_time)
+            except Exception as e:
+                print(f"Servo park warning: {e}")
+
         _safe_lidar_teardown(lidar)
         if servo:
             servo.detach()

@@ -29,6 +29,9 @@ scan3d:
   sweep_start: 0
   sweep_end: 180
   num_steps: 91         # Total number of servo angles (includes 0 and 180)
+  park_after_scan: true  # Back off slightly from the final angle before disconnect
+  park_backoff_deg: 5.0  # Example: finish at 180, then park at 175 for the next run
+  park_settle_time: 0.25
   # Per-slice scan quality parameters (optimized for maximum coverage)
   min_angle_resolution: 1.0  # 1-degree bins for finer resolution
   min_coverage: 0.70  # Target 70% coverage (252° of 360°)
