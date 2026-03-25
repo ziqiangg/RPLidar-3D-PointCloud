@@ -171,7 +171,7 @@ class PointCloudLoader:
     
     def get_point_count(self) -> int:
         """Get the number of points in the current cloud."""
-        if self.current_pcd:
+        if self.current_pcd is not None:
             return len(self.current_pcd.points)
         return 0
     
@@ -182,7 +182,7 @@ class PointCloudLoader:
         Returns:
             Tuple of (min_bound, max_bound) or None if no cloud loaded
         """
-        if self.current_pcd:
+        if self.current_pcd is not None:
             return (self.current_pcd.get_min_bound(), self.current_pcd.get_max_bound())
         return None
     
@@ -234,7 +234,7 @@ if __name__ == "__main__":
     print("Loading 2D scan...")
     pcd = loader.load_scan("2d", "ply")
     
-    if pcd:
+    if pcd is not None:
         print(f"Loaded {loader.get_point_count()} points")
         bounds = loader.get_bounds()
         if bounds:

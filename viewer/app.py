@@ -669,35 +669,17 @@ class RPLidarViewerApp:
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             default_filename = f"panorama_{timestamp}.jpg"
-
-            selected_file = [None]
-
-            def ask_save_file():
-                root = tk.Tk()
-                root.withdraw()
-                root.attributes('-topmost', True)
-
-                filename = filedialog.asksaveasfilename(
-                    parent=root,
-                    title="Save Stitched Panorama",
-                    initialdir=config.PERSISTENT_DIR,
-                    initialfile=default_filename,
-                    defaultextension=".jpg",
-                    filetypes=[
-                        ("JPEG files", "*.jpg"),
-                        ("PNG files", "*.png"),
-                        ("All files", "*.*")
-                    ]
-                )
-
-                root.destroy()
-                selected_file[0] = filename
-
-            dialog_thread = threading.Thread(target=ask_save_file)
-            dialog_thread.start()
-            dialog_thread.join()
-
-            filename = selected_file[0]
+            filename = self._ask_save_file_dialog(
+                title="Save Stitched Panorama",
+                initial_dir=config.PERSISTENT_DIR,
+                initial_file=default_filename,
+                default_extension=".jpg",
+                filetypes=[
+                    ("JPEG files", "*.jpg"),
+                    ("PNG files", "*.png"),
+                    ("All files", "*.*")
+                ],
+            )
             if not filename:
                 return
 
@@ -714,26 +696,11 @@ class RPLidarViewerApp:
             return
 
         try:
-            selected_dir = [None]
-
-            def ask_dir():
-                root = tk.Tk()
-                root.withdraw()
-                root.attributes('-topmost', True)
-                folder = filedialog.askdirectory(
-                    parent=root,
-                    title="Save Panorama Source Images",
-                    initialdir=config.PERSISTENT_DIR if os.path.exists(config.PERSISTENT_DIR) else config.DATA_DIR,
-                    mustexist=False,
-                )
-                root.destroy()
-                selected_dir[0] = folder
-
-            dialog_thread = threading.Thread(target=ask_dir)
-            dialog_thread.start()
-            dialog_thread.join()
-
-            target_dir = selected_dir[0]
+            initial_dir = config.PERSISTENT_DIR if os.path.exists(config.PERSISTENT_DIR) else config.DATA_DIR
+            target_dir = self._ask_directory_dialog(
+                title="Save Panorama Source Images",
+                initial_dir=initial_dir,
+            )
             if not target_dir:
                 return
 
@@ -755,47 +722,169 @@ class RPLidarViewerApp:
                 self.panorama_status_label.text = f"Status: {message}"
 
         gui.Application.instance.post_to_main_thread(self.window, update)
+
+    @staticmethod
+    def _escape_applescript(text: str) -> str:
+        """Escape text for inline AppleScript string literals."""
+        return text.replace("\\", "\\\\").replace('"', '\\"')
+
+    def _run_file_dialog_script(self, script: str) -> str | None:
+        """Run an AppleScript file dialog on macOS and normalize cancel behavior."""
+        completed = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            stderr = (completed.stderr or "").strip()
+            if "User canceled" in stderr or "(-128)" in stderr:
+                return None
+            raise RuntimeError(stderr or "osascript failed")
+
+        result = (completed.stdout or "").strip()
+        return result or None
+
+    def _ask_open_file_dialog(self, *, title: str, initial_dir: str, filetypes) -> str | None:
+        """Open file chooser with a macOS-safe implementation."""
+        if sys.platform == "darwin":
+            escaped_title = self._escape_applescript(title)
+            escaped_dir = self._escape_applescript(os.path.abspath(initial_dir))
+            script = (
+                f'set baseFolder to POSIX file "{escaped_dir}"\n'
+                f'try\n'
+                f'    set chosenFile to choose file with prompt "{escaped_title}" default location baseFolder\n'
+                f'    return POSIX path of chosenFile\n'
+                f'on error number -128\n'
+                f'    return ""\n'
+                f'end try'
+            )
+            return self._run_file_dialog_script(script)
+
+        selected_file = [None]
+
+        def ask_file():
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            filename = filedialog.askopenfilename(
+                parent=root,
+                title=title,
+                initialdir=initial_dir,
+                filetypes=filetypes,
+            )
+            root.destroy()
+            selected_file[0] = filename
+
+        dialog_thread = threading.Thread(target=ask_file)
+        dialog_thread.start()
+        dialog_thread.join()
+        return selected_file[0] or None
+
+    def _ask_save_file_dialog(
+        self,
+        *,
+        title: str,
+        initial_dir: str,
+        initial_file: str,
+        default_extension: str,
+        filetypes,
+    ) -> str | None:
+        """Open save-file chooser with a macOS-safe implementation."""
+        if sys.platform == "darwin":
+            escaped_title = self._escape_applescript(title)
+            escaped_dir = self._escape_applescript(os.path.abspath(initial_dir))
+            escaped_name = self._escape_applescript(initial_file)
+            script = (
+                f'set baseFolder to POSIX file "{escaped_dir}"\n'
+                f'try\n'
+                f'    set chosenFile to choose file name with prompt "{escaped_title}" '
+                f'default location baseFolder default name "{escaped_name}"\n'
+                f'    return POSIX path of chosenFile\n'
+                f'on error number -128\n'
+                f'    return ""\n'
+                f'end try'
+            )
+            filename = self._run_file_dialog_script(script)
+            if filename and default_extension and not filename.lower().endswith(default_extension.lower()):
+                filename = f"{filename}{default_extension}"
+            return filename
+
+        selected_file = [None]
+
+        def ask_save_file():
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            filename = filedialog.asksaveasfilename(
+                parent=root,
+                title=title,
+                initialdir=initial_dir,
+                initialfile=initial_file,
+                defaultextension=default_extension,
+                filetypes=filetypes,
+            )
+            root.destroy()
+            selected_file[0] = filename
+
+        dialog_thread = threading.Thread(target=ask_save_file)
+        dialog_thread.start()
+        dialog_thread.join()
+        return selected_file[0] or None
+
+    def _ask_directory_dialog(self, *, title: str, initial_dir: str) -> str | None:
+        """Open directory chooser with a macOS-safe implementation."""
+        if sys.platform == "darwin":
+            escaped_title = self._escape_applescript(title)
+            escaped_dir = self._escape_applescript(os.path.abspath(initial_dir))
+            script = (
+                f'set baseFolder to POSIX file "{escaped_dir}"\n'
+                f'try\n'
+                f'    set chosenFolder to choose folder with prompt "{escaped_title}" default location baseFolder\n'
+                f'    return POSIX path of chosenFolder\n'
+                f'on error number -128\n'
+                f'    return ""\n'
+                f'end try'
+            )
+            return self._run_file_dialog_script(script)
+
+        selected_dir = [None]
+
+        def ask_dir():
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            folder = filedialog.askdirectory(
+                parent=root,
+                title=title,
+                initialdir=initial_dir,
+                mustexist=False,
+            )
+            root.destroy()
+            selected_dir[0] = folder
+
+        dialog_thread = threading.Thread(target=ask_dir)
+        dialog_thread.start()
+        dialog_thread.join()
+        return selected_dir[0] or None
     
     def _on_load_file(self):
         """Handle load file button click."""
         print("[DEBUG] Load file button clicked")
         
         try:
-            # CRITICAL FIX: Run tkinter dialog in separate thread to avoid crash (Issue #4427)
-            # https://github.com/isl-org/Open3D/issues/4427
-            selected_file = [None]  # Use list to store result from thread
-            
-            def ask_file():
-                """Run file dialog in separate thread."""
-                root = tk.Tk()
-                root.withdraw()  # Hide the root window
-                root.attributes('-topmost', True)  # Bring dialog to front
-                
-                # Set initial directory
-                initial_dir = config.DATA_DIR if os.path.exists(config.DATA_DIR) else os.getcwd()
-                
-                print("[DEBUG] Opening file dialog...")
-                filename = filedialog.askopenfilename(
-                    parent=root,
-                    title="Select Point Cloud File",
-                    initialdir=initial_dir,
-                    filetypes=[
-                        ("Point Cloud files", "*.ply *.csv"),
-                        ("PLY files", "*.ply"),
-                        ("CSV files", "*.csv"),
-                        ("All files", "*.*")
-                    ]
-                )
-                
-                root.destroy()  # Clean up Tk window
-                selected_file[0] = filename  # Store result
-            
-            # Run dialog in thread and wait for completion
-            dialog_thread = threading.Thread(target=ask_file)
-            dialog_thread.start()
-            dialog_thread.join()  # Wait for thread to complete
-            
-            filename = selected_file[0]
+            initial_dir = config.DATA_DIR if os.path.exists(config.DATA_DIR) else os.getcwd()
+            print("[DEBUG] Opening file dialog...")
+            filename = self._ask_open_file_dialog(
+                title="Select Point Cloud File",
+                initial_dir=initial_dir,
+                filetypes=[
+                    ("Point Cloud files", "*.ply *.csv"),
+                    ("PLY files", "*.ply"),
+                    ("CSV files", "*.csv"),
+                    ("All files", "*.*")
+                ],
+            )
             
             if filename:
                 print(f"[DEBUG] File selected: {filename}")
@@ -834,7 +923,7 @@ class RPLidarViewerApp:
         """Handle save PLY button click - save point cloud with timestamp to persistent folder."""
         print("[DEBUG] Save PLY button clicked")
         
-        if not self.current_pcd:
+        if self.current_pcd is None:
             print("[DEBUG] No point cloud loaded to save")
             self._update_viz_status("Error: No point cloud loaded")
             return
@@ -850,37 +939,17 @@ class RPLidarViewerApp:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             default_filename = f"scan_{timestamp}.ply"
             
-            # CRITICAL FIX: Run tkinter dialog in separate thread to avoid crash
-            selected_file = [None]  # Use list to store result from thread
-            
-            def ask_save_file():
-                """Run file dialog in separate thread."""
-                root = tk.Tk()
-                root.withdraw()  # Hide the root window
-                root.attributes('-topmost', True)  # Bring dialog to front
-                
-                print("[DEBUG] Opening save file dialog...")
-                filename = filedialog.asksaveasfilename(
-                    parent=root,
-                    title="Save Point Cloud",
-                    initialdir=config.PERSISTENT_DIR,
-                    initialfile=default_filename,
-                    defaultextension=".ply",
-                    filetypes=[
-                        ("PLY files", "*.ply"),
-                        ("All files", "*.*")
-                    ]
-                )
-                
-                root.destroy()  # Clean up Tk window
-                selected_file[0] = filename  # Store result
-            
-            # Run dialog in thread and wait for completion
-            dialog_thread = threading.Thread(target=ask_save_file)
-            dialog_thread.start()
-            dialog_thread.join()  # Wait for thread to complete
-            
-            filename = selected_file[0]
+            print("[DEBUG] Opening save file dialog...")
+            filename = self._ask_save_file_dialog(
+                title="Save Point Cloud",
+                initial_dir=config.PERSISTENT_DIR,
+                initial_file=default_filename,
+                default_extension=".ply",
+                filetypes=[
+                    ("PLY files", "*.ply"),
+                    ("All files", "*.*")
+                ],
+            )
             
             if filename:
                 print(f"[DEBUG] Saving to: {filename}")
@@ -941,6 +1010,9 @@ class RPLidarViewerApp:
         pcd = o3d.geometry.PointCloud()
         pts = np.asarray(self.current_pcd.points)
         pcd.points = o3d.utility.Vector3dVector(np.array(pts, copy=True))
+        if self.current_pcd.has_colors():
+            colors = np.asarray(self.current_pcd.colors)
+            pcd.colors = o3d.utility.Vector3dVector(np.array(colors, copy=True))
         return pcd
 
     def _apply_normal_colors(self, pcd: o3d.geometry.PointCloud):
@@ -973,29 +1045,15 @@ class RPLidarViewerApp:
         if os.path.exists(config.PANORAMA_STITCHED_FILE):
             return config.PANORAMA_STITCHED_FILE
 
-        selected = [None]
-
-        def ask_file():
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes('-topmost', True)
-            initial_dir = config.PANORAMA_IMAGES_DIR if os.path.exists(config.PANORAMA_IMAGES_DIR) else config.DATA_DIR
-            filename = filedialog.askopenfilename(
-                parent=root,
-                title="Select Stitched Panorama Image",
-                initialdir=initial_dir,
-                filetypes=[
-                    ("Image files", "*.jpg *.jpeg *.png"),
-                    ("All files", "*.*")
-                ]
-            )
-            root.destroy()
-            selected[0] = filename
-
-        dialog_thread = threading.Thread(target=ask_file)
-        dialog_thread.start()
-        dialog_thread.join()
-        return selected[0]
+        initial_dir = config.PANORAMA_IMAGES_DIR if os.path.exists(config.PANORAMA_IMAGES_DIR) else config.DATA_DIR
+        return self._ask_open_file_dialog(
+            title="Select Stitched Panorama Image",
+            initial_dir=initial_dir,
+            filetypes=[
+                ("Image files", "*.jpg *.jpeg *.png"),
+                ("All files", "*.*")
+            ],
+        )
 
     def _estimate_panorama_yaw_offset_rad(self, points: np.ndarray, pano_img: np.ndarray) -> float:
         """Estimate yaw offset by correlating cloud yaw occupancy and panorama edge energy."""
@@ -1077,7 +1135,8 @@ class RPLidarViewerApp:
         pcd = self._clone_current_pcd()
 
         if self.render_mode == "normal":
-            self._apply_normal_colors(pcd)
+            if not pcd.has_colors():
+                self._apply_normal_colors(pcd)
             return pcd
 
         if self.render_mode == "distance":
@@ -1090,7 +1149,8 @@ class RPLidarViewerApp:
                 return None
             return pcd
 
-        self._apply_normal_colors(pcd)
+        if not pcd.has_colors():
+            self._apply_normal_colors(pcd)
         return pcd
     
     def load_and_display_file(self, file_path: str):
@@ -1105,7 +1165,7 @@ class RPLidarViewerApp:
         pcd = self.loader.load_file(file_path)
         print(f"[DEBUG] File loaded, pcd is None: {pcd is None}")
         
-        if pcd:
+        if pcd is not None:
             # Validate geometry
             if len(pcd.points) == 0:
                 print("[DEBUG] ERROR: Point cloud is empty!")

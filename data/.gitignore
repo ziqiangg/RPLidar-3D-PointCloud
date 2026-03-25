@@ -5,6 +5,8 @@
 *.png
 *.jpg
 *.jpeg
+*.npz
+*.json
 
 #folder
 __pycache__/
