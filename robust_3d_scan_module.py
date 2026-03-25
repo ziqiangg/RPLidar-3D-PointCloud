@@ -33,6 +33,7 @@ DEFAULTS = {
     'sweep_end': 180,
     'num_steps': 91,
     'park_after_scan': True,
+    'park_target_deg': None,
     'park_backoff_deg': 5.0,
     'park_settle_time': 0.25,
     'max_scans': 40,
@@ -480,6 +481,8 @@ def run_scan(
     sweep_end = float(scan_config.get('sweep_end', DEFAULTS['sweep_end']))
     num_steps = int(scan_config.get('num_steps', DEFAULTS['num_steps']))
     park_after_scan = bool(scan_config.get('park_after_scan', DEFAULTS['park_after_scan']))
+    park_target_raw = scan_config.get('park_target_deg', DEFAULTS['park_target_deg'])
+    park_target_deg = None if park_target_raw in (None, "") else float(park_target_raw)
     park_backoff_deg = abs(float(scan_config.get('park_backoff_deg', DEFAULTS['park_backoff_deg'])))
     park_settle_time = float(scan_config.get('park_settle_time', DEFAULTS['park_settle_time']))
     
@@ -725,29 +728,34 @@ def run_scan(
             servo
             and park_after_scan
             and last_servo_angle is not None
-            and park_backoff_deg > 0.0
+            and (park_target_deg is not None or park_backoff_deg > 0.0)
             and len(steps) >= 1
         ):
             try:
                 lower = min(sweep_start, sweep_end)
                 upper = max(sweep_start, sweep_end)
-                direction = 0.0
-                if len(steps) >= 2:
-                    direction = float(steps[-1] - steps[0])
-
-                if direction > 0.0:
-                    park_target = max(lower, min(upper, last_servo_angle - park_backoff_deg))
-                elif direction < 0.0:
-                    park_target = max(lower, min(upper, last_servo_angle + park_backoff_deg))
+                if park_target_deg is not None:
+                    park_target = max(lower, min(upper, park_target_deg))
+                    park_reason = f"absolute park target {park_target_deg:.1f}°"
                 else:
-                    park_target = last_servo_angle
+                    direction = 0.0
+                    if len(steps) >= 2:
+                        direction = float(steps[-1] - steps[0])
+
+                    if direction > 0.0:
+                        park_target = max(lower, min(upper, last_servo_angle - park_backoff_deg))
+                    elif direction < 0.0:
+                        park_target = max(lower, min(upper, last_servo_angle + park_backoff_deg))
+                    else:
+                        park_target = last_servo_angle
+                    park_reason = f"{park_backoff_deg:.1f}° backoff from scan endpoint"
 
                 if abs(park_target - last_servo_angle) > 1e-6:
                     progress_callback({
                         'stage': 'parking',
                         'message': (
                             f'Parking servo at {park_target:.1f}° '
-                            f'({park_backoff_deg:.1f}° backoff from scan endpoint)'
+                            f'({park_reason})'
                         ),
                     })
                     servo.set_angle(park_target)
