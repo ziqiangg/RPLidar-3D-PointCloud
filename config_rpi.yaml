@@ -29,24 +29,31 @@ scan3d:
   sweep_start: 0
   sweep_end: 180
   num_steps: 91         # Total number of servo angles (includes 0 and 180)
+
+  # End-of-scan parking behavior
   park_after_scan: true  # Back off slightly from the final angle before disconnect
-  park_target_deg: 5.0   # Preferred: park near the next scan start so the following run only makes a small move
+  park_target_deg: 20.0  # Preferred: park near the next scan start so the following run only makes a small move
   park_backoff_deg: 5.0  # Fallback when park_target_deg is unset
   park_settle_time: 0.25
-  # Per-slice scan quality parameters (optimized for maximum coverage)
-  min_angle_resolution: 1.0  # 1-degree bins for finer resolution
-  min_coverage: 0.70  # Target 70% coverage (252° of 360°)
-  relaxed_max_gap: 15.0  # Maximum acceptable gap between points (degrees)
-  max_scans_to_merge: 40  # Merge up to 40 scans for dense coverage
-  plateau_patience: 10  # Wait for 10 plateau iterations before accepting
-  slice_timeout: 60.0  # 60 seconds per slice for thorough coverage
-  lidar_timeout: 3.0
-  progress_every_slices: 1
-  min_distance_mm: 50  # Filter points closer than 50mm
-  min_quality: 10  # Minimum quality threshold (0-15 scale)
+
+  # Slice capture behavior used by robust_3d_scan_module.capture_robust_slice()
+  max_scans: 40          # Max LiDAR revolutions per slice before forcing completion
+  min_scans: 10          # Minimum revolutions before plateau detection may stop a slice
+  plateau_iters: 5       # Number of recent coverage samples considered for stability
+  plateau_tol: 0.01      # Coverage variation threshold to treat as plateaued
+  bin_deg: 1.0           # Angular bin size used for per-slice coverage and median merge
+  min_dist: 150          # Drop measurements closer than this (mm)
+  max_dist: 12000        # Drop measurements farther than this (mm)
+
+  # LiDAR recovery behavior
+  slice_io_retries: 1
+  first_slice_extra_io_retries: 1
+  io_reinit_spinup_s: 2.0
+
+  # Motor / worker behavior
   motor_pwm: 300  # Motor speed (0-1023, default=660, lower=slower=denser scans)
   worker_stall_timeout: 20.0
-  buffer_size: 5000
+
   # Final cloud processing on RP5 before MQTT transfer
   save_slice_files: false   # Keep per-slice debug PLY files locally if true
   sor_neighbors: 12         # Statistical outlier filtering neighborhood size
