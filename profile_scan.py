@@ -29,8 +29,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import yaml
 
-PROFILER_VERSION = "2.0"
-REPORT_SCHEMA_VERSION = 2
+PROFILER_VERSION = "2.1"
+REPORT_SCHEMA_VERSION = 3
 
 
 def _utc_now_iso() -> str:
@@ -386,6 +386,104 @@ def _run_local_once(
                 progress_callback=progress_callback,
             )
 
+        elif scan_type == "schedule_experiment":
+            import robust_3d_scan_module as base_scan_module
+            import schedule_experiment as scan_module
+
+            _patch_attr(
+                base_scan_module,
+                "_init_lidar",
+                _record_call(
+                    "init_lidar",
+                    run_ctx.started_at_perf,
+                    wrapped_events,
+                    base_scan_module._init_lidar,
+                ),
+                originals,
+            )
+            _patch_attr(
+                base_scan_module.PicoServoController,
+                "set_angle",
+                _record_call(
+                    "servo_set_angle",
+                    run_ctx.started_at_perf,
+                    wrapped_events,
+                    base_scan_module.PicoServoController.set_angle,
+                    meta_factory=lambda result, args, kwargs: {
+                        "requested_angle": float(args[1]) if len(args) > 1 else None,
+                    },
+                ),
+                originals,
+            )
+            _patch_attr(
+                base_scan_module,
+                "capture_robust_slice",
+                _record_call(
+                    "capture_robust_slice",
+                    run_ctx.started_at_perf,
+                    wrapped_events,
+                    base_scan_module.capture_robust_slice,
+                    meta_factory=lambda result, args, kwargs: {
+                        "slice_name": str(args[1]) if len(args) > 1 else None,
+                        "point_count": len(result[0]),
+                        "had_io_error": bool(result[1]),
+                        "scan_count": int(result[2].get("scan_count", 0)),
+                        "coverage_percent": float(result[2].get("coverage_percent", 0.0)),
+                        "termination_reason": str(result[2].get("termination_reason", "unknown")),
+                        "pass_label": str(result[2].get("pass_label", "unknown")),
+                    },
+                ),
+                originals,
+            )
+            _patch_attr(
+                base_scan_module,
+                "_voxel_downsample_points",
+                _record_call(
+                    "voxel_downsample",
+                    run_ctx.started_at_perf,
+                    wrapped_events,
+                    base_scan_module._voxel_downsample_points,
+                    meta_factory=lambda result, args, kwargs: {
+                        "before_points": len(args[0]) if args else None,
+                        "after_points": len(result),
+                    },
+                ),
+                originals,
+            )
+            _patch_attr(
+                base_scan_module,
+                "_sor_filter_points",
+                _record_call(
+                    "sor_filter",
+                    run_ctx.started_at_perf,
+                    wrapped_events,
+                    base_scan_module._sor_filter_points,
+                    meta_factory=lambda result, args, kwargs: {
+                        "before_points": len(args[0]) if args else None,
+                        "after_points": len(result[0]),
+                        "note": str(result[1]),
+                    },
+                ),
+                originals,
+            )
+
+            def progress_callback(payload: Dict[str, Any]) -> None:
+                event = dict(payload)
+                event["offset_ms"] = round(
+                    (time.perf_counter() - run_ctx.started_at_perf) * 1000.0,
+                    3,
+                )
+                progress_events.append(event)
+
+            result = scan_module.run_scan(
+                port=port,
+                output_dir=str(data_dir),
+                servo_config=config.get("servo", {}),
+                scan_config=config.get("scan3d", {}),
+                experiment_config=config.get("schedule_experiment", {}),
+                progress_callback=progress_callback,
+            )
+
         else:
             raise ValueError(f"Unsupported local scan type: {scan_type}")
 
@@ -401,6 +499,9 @@ def _run_local_once(
         run["stage_summary"] = _summarize_named_events(wrapped_events)
         slice_analysis = result.get("scan_quality", {}).get("slice_analysis", [])
         run["slice_analysis_summary"] = _summarize_slice_analysis(slice_analysis)
+        schedule_experiment_summary = result.get("scan_quality", {}).get("schedule_experiment")
+        if schedule_experiment_summary is not None:
+            run["schedule_experiment_summary"] = schedule_experiment_summary
         run["files"] = [_file_info(path) for path in result.get("files", [])]
         return run
 
@@ -423,6 +524,9 @@ def _run_mqtt_once(
     config_path: Path,
     timeout_s: float,
 ) -> Dict[str, Any]:
+    if scan_type == "schedule_experiment":
+        raise ValueError("schedule_experiment profiling is only supported in local mode")
+
     from laptop_viewer_client import LaptopViewerClient
 
     run_ctx = _start_run_context()
@@ -559,6 +663,8 @@ def _print_summary(report: Dict[str, Any]) -> None:
         if run.get("mode") == "local":
             print(f"  stage_summary={run.get('stage_summary')}")
             print(f"  slice_analysis_summary={run.get('slice_analysis_summary')}")
+            if run.get("schedule_experiment_summary") is not None:
+                print(f"  schedule_experiment_summary={run.get('schedule_experiment_summary')}")
         else:
             print(f"  first_status_offset_ms={run.get('first_status_offset_ms')}")
             print(f"  terminal_status_offset_ms={run.get('terminal_status_offset_ms')}")
@@ -571,7 +677,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scan-type",
         default="robust_3d",
-        choices=["2d", "robust_3d"],
+        choices=["2d", "robust_3d", "schedule_experiment"],
         help="Scan type to profile.",
     )
     parser.add_argument(

@@ -63,6 +63,18 @@ scan3d:
   sor_max_runtime_s: 2.5    # Automatic cutoff: abort SOR if it exceeds this runtime
   voxel_size_m: 0.01        # Voxel grid size in meters for downsampling
 
+schedule_experiment:
+  # Two-pass adaptive revisit scheduling policy for PASO step S experiments.
+  policy: "two_pass_adaptive_revisit"
+  pass1_max_scans: 10           # Baseline budget given to every slice in pass 1
+  pass1_min_scans: 10
+  revisit_max_scans: 19         # Fresh recapture budget for slices selected for pass 2
+  revisit_min_scans: 10
+  revisit_if_coverage_below: 45.0
+  revisit_if_point_count_below: 170
+  revisit_top_n: 0              # Optional extra weak slices to revisit even if thresholds do not trigger
+  revisit_order: "weakest_first"
+
 panorama:
   # Inherit robust_3d sweep bounds by default, then clamp panorama to max_panorama_deg.
   inherit_scan3d_sweep: true
