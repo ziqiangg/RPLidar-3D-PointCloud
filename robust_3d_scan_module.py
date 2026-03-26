@@ -184,14 +184,19 @@ def _bin_index(angle, bin_deg):
     """Convert angle to bin index."""
     return int((angle % 360.0) / bin_deg)
 
-def capture_robust_slice(lidar: RPLidar, slice_name: str, config: dict) -> Tuple[List[Tuple[float, float, float]], bool]:
+def capture_robust_slice(
+    lidar: RPLidar,
+    slice_name: str,
+    config: dict,
+) -> Tuple[List[Tuple[float, float, float]], bool, dict]:
     """
     Captures a single 360-degree slice using robust median filtering.
     Stops when coverage plateaus (stabilizes) or max scans reached.
     
-    Returns: (List of (quality, angle, distance), had_io_error)
+    Returns: (List of (quality, angle, distance), had_io_error, slice_stats)
     """
     print(f"  > Starting capture for {slice_name}...")
+    started_at = time.perf_counter()
     
     # Extract config with defaults
     MAX_SCANS = config.get('max_scans', DEFAULTS['max_scans'])
@@ -211,6 +216,10 @@ def capture_robust_slice(lidar: RPLidar, slice_name: str, config: dict) -> Tuple
     
     scan_count = 0
     had_io_error = False
+    termination_reason = "stream_ended"
+    total_possible_bins = int(360.0 / BIN_DEG)
+    filled_bins = 0
+    coverage = 0.0
     
     # Clear any stale buffer
     try:
@@ -243,7 +252,6 @@ def capture_robust_slice(lidar: RPLidar, slice_name: str, config: dict) -> Tuple
             # --- Check Stop Conditions ---
             
             # 1. Calculate Coverage
-            total_possible_bins = int(360.0 / BIN_DEG)
             filled_bins = len(bin_dists)
             coverage = filled_bins / total_possible_bins
             
@@ -268,13 +276,16 @@ def capture_robust_slice(lidar: RPLidar, slice_name: str, config: dict) -> Tuple
 
             # Exit triggers
             if is_stable:
+                termination_reason = "plateau"
                 break
             if scan_count >= MAX_SCANS:
                 print("    - Max scans reached.")
+                termination_reason = "max_scans"
                 break
                 
     except Exception as e:
         had_io_error = _is_io_error(e)
+        termination_reason = "io_error" if had_io_error else "exception"
         print(f"Error during slice capture: {e}")
 
     # Compute Median Scan
@@ -290,7 +301,19 @@ def capture_robust_slice(lidar: RPLidar, slice_name: str, config: dict) -> Tuple
         merged_points.append((final_qual, final_ang, final_dist))
     
     print(f"  > Slice complete. {len(merged_points)} valid points.")
-    return merged_points, had_io_error
+    slice_stats = {
+        'slice_name': slice_name,
+        'elapsed_ms': round((time.perf_counter() - started_at) * 1000.0, 3),
+        'scan_count': int(scan_count),
+        'filled_bins': int(filled_bins),
+        'total_bins': int(total_possible_bins),
+        'coverage_fraction': round(float(coverage), 6),
+        'coverage_percent': round(float(coverage) * 100.0, 3),
+        'point_count': int(len(merged_points)),
+        'termination_reason': termination_reason,
+        'had_io_error': bool(had_io_error),
+    }
+    return merged_points, had_io_error, slice_stats
 
 
 def _voxel_downsample_points(
@@ -502,6 +525,7 @@ def run_scan(
     lidar = None
     all_points_3d = []
     generated_files = []
+    slice_analyses = []
     save_slice_files = bool(scan_config.get('save_slice_files', False))
     last_servo_angle: Optional[float] = None
     steps = np.linspace(sweep_start, sweep_end, num_steps)
@@ -560,8 +584,14 @@ def run_scan(
             retry_budget = base_io_retries + (first_slice_extra_retries if i == 0 else 0)
             attempt = 0
             slice_points_2d = []
+            slice_attempts = []
             while True:
-                slice_points_2d, had_io_error = capture_robust_slice(lidar, f"Slice_{i}", capture_config)
+                slice_points_2d, had_io_error, slice_stats = capture_robust_slice(
+                    lidar,
+                    f"Slice_{i}",
+                    capture_config,
+                )
+                slice_attempts.append(slice_stats)
 
                 if not had_io_error:
                     break
@@ -589,6 +619,28 @@ def run_scan(
                     motor_pwm=motor_pwm,
                     spinup_s=reinit_spinup_s,
                 )
+
+            slice_analysis = dict(slice_attempts[-1]) if slice_attempts else {}
+            slice_analysis.update({
+                'slice_index': int(i),
+                'servo_angle_deg': round(float(servo_angle), 3),
+                'attempt_count': int(len(slice_attempts)),
+                'retry_count': int(max(0, len(slice_attempts) - 1)),
+                'attempts': slice_attempts,
+            })
+            slice_analyses.append(slice_analysis)
+            progress_callback({
+                'stage': 'slice_analysis',
+                'message': (
+                    f"Slice {i + 1}/{len(steps)} at {servo_angle:.1f}°: "
+                    f"{slice_analysis.get('scan_count', 0)} scans, "
+                    f"{slice_analysis.get('coverage_percent', 0.0):.1f}% coverage, "
+                    f"stop={slice_analysis.get('termination_reason', 'unknown')}"
+                ),
+                'slice_index': i,
+                'total_slices': len(steps),
+                'slice_analysis': slice_analysis,
+            })
             
             # Process to 3D and Save Slice
             slice_points_3d = []
@@ -721,7 +773,9 @@ def run_scan(
             'files': generated_files,
             'error': str(e),
             'message': f"Robust scan failed: {e}",
-            'scan_quality': {}
+            'scan_quality': {
+                'slice_analysis': slice_analyses,
+            }
         }
     finally:
         if (
@@ -782,6 +836,7 @@ def run_scan(
             'sor_neighbors': int(scan_config.get('sor_neighbors', 0)),
             'sor_std_ratio': float(scan_config.get('sor_std_ratio', 0.0)),
             'sor_radius_m': float(scan_config.get('sor_radius_m', 0.0)),
+            'slice_analysis': slice_analyses,
         }
     }
 

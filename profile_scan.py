@@ -29,6 +29,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 import yaml
 
+PROFILER_VERSION = "2.0"
+REPORT_SCHEMA_VERSION = 2
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -79,6 +82,51 @@ def _summarize_named_events(events: List[Dict[str, Any]]) -> Dict[str, Dict[str,
             continue
         grouped.setdefault(name, []).append(float(elapsed_ms))
     return {name: _stat_summary(values) for name, values in sorted(grouped.items())}
+
+
+def _summarize_slice_analysis(slice_analysis: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not slice_analysis:
+        return {"count": 0}
+
+    elapsed_vals = [float(item.get("elapsed_ms", 0.0)) for item in slice_analysis]
+    coverage_vals = [float(item.get("coverage_percent", 0.0)) for item in slice_analysis]
+    scan_count_vals = [float(item.get("scan_count", 0.0)) for item in slice_analysis]
+    point_count_vals = [float(item.get("point_count", 0.0)) for item in slice_analysis]
+
+    termination_counts: Dict[str, int] = {}
+    for item in slice_analysis:
+        reason = str(item.get("termination_reason", "unknown"))
+        termination_counts[reason] = termination_counts.get(reason, 0) + 1
+
+    slowest = sorted(
+        slice_analysis,
+        key=lambda item: float(item.get("elapsed_ms", 0.0)),
+        reverse=True,
+    )[:5]
+
+    slowest_slices = [
+        {
+            "slice_index": item.get("slice_index"),
+            "servo_angle_deg": item.get("servo_angle_deg"),
+            "elapsed_ms": item.get("elapsed_ms"),
+            "scan_count": item.get("scan_count"),
+            "coverage_percent": item.get("coverage_percent"),
+            "point_count": item.get("point_count"),
+            "termination_reason": item.get("termination_reason"),
+            "retry_count": item.get("retry_count", 0),
+        }
+        for item in slowest
+    ]
+
+    return {
+        "count": len(slice_analysis),
+        "termination_reason_counts": termination_counts,
+        "elapsed_ms": _stat_summary(elapsed_vals),
+        "coverage_percent": _stat_summary(coverage_vals),
+        "scan_count": _stat_summary(scan_count_vals),
+        "point_count": _stat_summary(point_count_vals),
+        "slowest_slices": slowest_slices,
+    }
 
 
 def _file_info(path_str: str) -> Dict[str, Any]:
@@ -283,6 +331,9 @@ def _run_local_once(
                         "slice_name": str(args[1]) if len(args) > 1 else None,
                         "point_count": len(result[0]),
                         "had_io_error": bool(result[1]),
+                        "scan_count": int(result[2].get("scan_count", 0)),
+                        "coverage_percent": float(result[2].get("coverage_percent", 0.0)),
+                        "termination_reason": str(result[2].get("termination_reason", "unknown")),
                     },
                 ),
                 originals,
@@ -348,6 +399,8 @@ def _run_local_once(
         run["wrapped_events"] = wrapped_events
         run["progress_events"] = progress_events
         run["stage_summary"] = _summarize_named_events(wrapped_events)
+        slice_analysis = result.get("scan_quality", {}).get("slice_analysis", [])
+        run["slice_analysis_summary"] = _summarize_slice_analysis(slice_analysis)
         run["files"] = [_file_info(path) for path in result.get("files", [])]
         return run
 
@@ -472,6 +525,8 @@ def _build_report(
 
     report = {
         "created_at": _utc_now_iso(),
+        "profiler_version": PROFILER_VERSION,
+        "report_schema_version": REPORT_SCHEMA_VERSION,
         "argv": sys.argv,
         "mode": args.mode,
         "scan_type": args.scan_type,
@@ -503,6 +558,7 @@ def _print_summary(report: Dict[str, Any]) -> None:
         print(f"  elapsed_ms={run.get('elapsed_ms')}")
         if run.get("mode") == "local":
             print(f"  stage_summary={run.get('stage_summary')}")
+            print(f"  slice_analysis_summary={run.get('slice_analysis_summary')}")
         else:
             print(f"  first_status_offset_ms={run.get('first_status_offset_ms')}")
             print(f"  terminal_status_offset_ms={run.get('terminal_status_offset_ms')}")
@@ -599,6 +655,8 @@ def main() -> int:
     except Exception as exc:
         failure_report = {
             "created_at": _utc_now_iso(),
+            "profiler_version": PROFILER_VERSION,
+            "report_schema_version": REPORT_SCHEMA_VERSION,
             "mode": args.mode,
             "scan_type": args.scan_type,
             "error": str(exc),
