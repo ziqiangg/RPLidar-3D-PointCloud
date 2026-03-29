@@ -2,25 +2,7 @@
 
 **Distributed RPLidar scanning system with Raspberry Pi scanner service and laptop GUI client communicating via MQTT.**
 
-## 🎯 System Architecture
-
-```
-┌──────────────────────────────────┐        ┌───────────────────────────────┐
-│ LAPTOP (Windows)                 │        │ RASPBERRY PI 5                │
-│ IP: `your laptop ip`            │◄──────►│                               │
-│                                  │  MQTT  │                               │
-│ ├─ Mosquitto Broker (1883)      │        │ ├─ RPLidar Scanner Service    │
-│ ├─ MQTT Viewer Client            │        │ ├─ RPLidar A1/A2 (USB)       │
-│ └─ Open3D GUI (Visualization)    │        │ └─ dump_one_scan.py           │
-└──────────────────────────────────┘        └───────────────────────────────┘
-```
-
-**How It Works:**
-1. **Laptop GUI** publishes scan command to MQTT broker → `rplidar/commands/scan`
-2. **Raspberry Pi** subscribed to commands, receives request and executes `dump_one_scan.py`
-3. **RPi** scans environment with RPLidar (360° 2D scan), generates CSV/PLY files
-4. **RPi** publishes scan data in 256KB chunks to MQTT → `rplidar/data/<scan_id>`
-5. **Laptop** receives chunks, reassembles files, loads into Open3D for visualization
+## System Architecture
 
 **Key Features:**
 - ✅ **Distributed Architecture**: RPLidar on RPi, visualization on laptop
@@ -32,12 +14,7 @@
 
 ---
 
-## 📋 Requirements
-
-### Hardware
-- **Raspberry Pi 5** (or RPi 4/3B+) with WiFi/Ethernet
-- **RPLidar A1 or A2** with USB connection
-- **Laptop** (Windows/Linux/macOS) on same network
+## Requirements
 
 ### Software
 - **Python 3.12** (both laptop and RPi)
@@ -49,9 +26,44 @@
 - Laptop must have static IP or known hostname
 - Port 1883 (MQTT) open on laptop firewall
 
+### Hardware Wiring (Robust 3D + Panorama)
+
+- **RPLIDAR A1 + CP210x to RP5**:
+  - RPLIDAR core TX -> CP210x RX
+  - RPLIDAR core RX -> CP210x TX
+  - CP210x GND -> RP5 GND
+  - CP210x USB -> RP5 USB (serial data path)
+- **Servo to Cytron Robo Pico**:
+  - Servo Vcc (Red) -> Pico 5V
+  - Servo GND (Brown/Black) -> Pico GND
+  - Servo PWM (Orange/Yellow) -> Pico GPIO 15
+- **Pico to RP5**:
+  - Pico Micro-USB -> RP5 USB (serial command path)
+- **Webcams to RP5**:
+  - Two Logitech C270 webcams connected by USB (update to your specifications)
+  - Primary camera path: `/dev/v4l/by-id/usb-046d_081b_DDCCCA90-video-index0`
+  - Secondary camera path: `/dev/v4l/by-id/usb-046d_081b_13D1CA90-video-index0`
+- **Power**:
+  - Use separate stable power for RP5 and servo rail (recommended)
+
+![Physical scan setup](readmefigures/setup.png)
+
+### 3D Scan Flow (Concise)
+
+1. Laptop publishes `scan_type: "robust_3d"` to `rplidar/commands/scan`.
+2. RP5 scanner service runs `robust_3d_scan_module.py`.
+3. RP5 drives servo angles via Pico serial (`ANGLE:<deg>`), captures LiDAR slices, and stitches a 3D cloud.
+4. RP5 applies voxel downsampling and optional SOR filtering.
+5. RP5 publishes `robust_scan_full.ply` and `robust_scan_full.csv` over chunked MQTT.
+6. If enabled, RP5 runs RandLA-Net inference and publishes segmentation outputs.
+
+Example robust_3d output (labeled point cloud):
+
+![Example labeled point cloud](readmefigures/pointcloud.gif)
+
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 **For complete setup instructions, see [README_SETUP.md](README_SETUP.md)**
 
@@ -79,48 +91,30 @@ python viewer/app.py
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 ```
 RPLidar-3D-PointCloud/
-├── mqtt_protocol/              # Shared MQTT protocol layer
-│   ├── __init__.py
-│   ├── topics.py              # Topic definitions
-│   ├── messages.py            # Message schemas (JSON)
-│   └── client_base.py         # Base MQTT client
-│
-├── rpi_scanner_service.py     # Raspberry Pi: Main scanner service
-├── laptop_viewer_client.py    # Laptop: MQTT client for GUI
-│
-├── config_rpi.yaml            # RPi configuration (broker IP, port)
-├── config_laptop.yaml         # Laptop configuration (data dir)
-│
-├── requirements_rpi.txt       # RPi dependencies (minimal, no GUI)
-├── requirements_laptop.txt    # Laptop dependencies (full, with Open3D)
-│
-├── viewer/                    # GUI Application (laptop only)
-│   ├── app.py                # Main GUI - file browser + 3D view
-│   ├── scan_controller.py    # MQTT-based scan control
-│   ├── point_cloud_loader.py # PLY/CSV file loading
-│   └── config.py             # GUI configuration
-│
-├── dump_one_scan.py          # Core 2D scanning script (RPi)
-├── robust_3d_scan_module.py  # Robust 3D scanning module (RPi)
-│
-├── utils/
-│   └── port_config.py        # Serial port detection
-│
-├── examples/
-│   ├── rplidarTest.py        # RPLidar connection test
-│   └── select_port.py        # Port selection utility
-│
-└── data/                     # Scan output directory
-    ├── scan.csv              # Latest 2D scan (CSV)
-    └── scan.ply              # Latest 2D scan (PLY)
+├── rpi_scanner_service.py      # RP5 entrypoint: dispatches robust_3d/panorama scans
+├── robust_3d_scan_module.py    # Robust 3D slice capture, stitching, filtering, file export
+├── panorama_scan_module.py     # Servo-stepped dual-camera panorama capture with recovery
+├── config_rpi.yaml             # RP5 scan params (scan3d + panorama + segmentation)
+├── laptop_viewer_client.py     # Laptop MQTT client: command + file reassembly
+├── viewer/
+│   ├── app.py                  # GUI
+│   ├── scan_controller.py      # Start/stop/step controls for robust_3d and panorama
+│   └── panorama_stitcher.py    # Laptop-side panorama stitching utilities
+├── mqtt_protocol/              # Topics and message schemas
+├── requirements_rpi.txt        # RP5 runtime dependencies
+├── requirements_laptop.txt     # Laptop runtime dependencies
+└── data/
+  ├── robust_scan_full.ply    # Stitched robust_3d cloud
+  ├── robust_scan_full.csv    # Stitched robust_3d points
+  └── images/panorama_*.jpg   # Panorama capture frames
 ```
 
 ---
 
-## 📡 MQTT Communication Protocol
+## MQTT Communication Protocol
 
 ### Topics
 
@@ -132,39 +126,57 @@ RPLidar-3D-PointCloud/
 
 ### Message Flow
 
-**1. Scan Request (Laptop → RPi)**
+**1. Scan Request (Laptop -> RP5)**
 ```json
 {
   "scan_id": "scan_20260224_143022",
-  "scan_type": "2d",
+  "scan_type": "robust_3d",
   "port": "/dev/ttyUSB0",
   "timestamp": 1708783822.5
 }
 ```
 
-**2. Status Update (RPi → Laptop)**
+**2. Status Updates (RP5 -> Laptop)**
+
+During robust_3d and panorama runs, RP5 publishes `started` progress messages and then a final `completed/error/stopped` status.
+
 ```json
 {
   "scan_id": "scan_20260224_143022",
   "status": "completed",
-  "message": "Scan completed successfully: 1234 points",
+  "message": "Scan completed successfully",
   "timestamp": 1708783835.2,
-  "point_count": 1234,
-  "files": ["scan.ply", "scan.csv"]
+  "point_count": 8421,
+  "files": ["robust_scan_full.ply", "robust_scan_full.csv"]
 }
 ```
 
-**3. Data Transfer (RPi → Laptop)**
+**3. Data Transfer (RP5 -> Laptop)**
 ```json
 {
   "scan_id": "scan_20260224_143022",
-  "filename": "scan.ply",
+  "filename": "robust_scan_full.ply",
   "chunk_index": 0,
   "total_chunks": 3,
   "data": "<base64_encoded_chunk>",
   "timestamp": 1708783835.5
 }
 ```
+
+**4. Panorama Request (Laptop -> RP5)**
+
+Set `scan_type` to `panorama`; RP5 captures dual-camera images while stepping servo angles.
+
+```json
+{
+  "scan_id": "scan_20260224_144501",
+  "scan_type": "panorama",
+  "port": "auto",
+  "timestamp": 1708784101.2
+}
+```
+
+Panorama files are sent as `panorama_XX.jpg` in chunked data messages.
 
 ### QoS & Reliability
 - **QoS 1** (At least once delivery) for all messages
@@ -174,42 +186,98 @@ RPLidar-3D-PointCloud/
 
 ---
 
-## 🔧 Configuration Files
+## Configuration Files
 
 ### `config_rpi.yaml` (Raspberry Pi)
+
+User-configured fields in this file:
+- `mqtt.broker_host`
+- `panorama.camera_index`
+- `panorama.camera_secondary_index`
+- `segmentation.enabled` and segmentation paths (if used)
+
 ```yaml
 mqtt:
-  broker_host: "your laptop ip"  # Laptop IP address
+  broker_host: "<set_to_laptop_broker_host>"  # user configured
   broker_port: 1883
-  client_id: "rplidar_scanner_rpi"
   qos: 1
 
-scanner:
+device:
+  role: "scanner"
+  client_id: "rplidar_scanner_rpi"
   default_port: "/dev/ttyUSB0"
-  scan_2d_script: "./dump_one_scan.py"
+
+data:
+  output_dir: "./data"
+  formats: ["csv", "ply"]
+
+servo:
+  serial_port: "auto"
+  baudrate: 115200
+  timeout: 8.0
+  settle_time: 0.5
+
+scan3d:
+  sweep_start: 0
+  sweep_end: 180
+  num_steps: 91
+  voxel_size_m: 0.01
+  sor_neighbors: 12
+  sor_std_ratio: 1.0
+  sor_radius_m: 0.08
+
+panorama:
+  inherit_scan3d_sweep: true
+  start_deg: 0
+  end_deg: 160
+  step_deg: 20
+  camera_index: "<set_primary_camera_source>"      # user configured
+  camera_secondary_index: "<set_secondary_camera_source>"  # user configured
+  image_format: jpg
+  image_width: 1280
+  image_height: 720
+
+segmentation:
+  enabled: true
+  checkpoint: "<set_if_custom_checkpoint_path>"  # user configured when customized
+  output_dir: "<set_if_custom_output_dir>"       # user configured when customized
 
 logging:
   level: "INFO"
 ```
 
 ### `config_laptop.yaml` (Laptop)
+
+User-configured fields in this file:
+- `mqtt.broker_host` (if broker is not local)
+- `data.receive_dir` (optional)
+
 ```yaml
 mqtt:
-  broker_host: "localhost"
+  broker_host: "<set_to_broker_host>"  # user configured
   broker_port: 1883
-  client_id: "rplidar_viewer_laptop"
   qos: 1
 
-viewer:
+device:
+  role: "client"
+  client_id: "rplidar_viewer_laptop"
+
+data:
   receive_dir: "./data"
   auto_load: true
-  window_width: 1024
-  window_height: 768
+
+logging:
+  level: "INFO"
+
+viewer:
+  window_width: 1280
+  window_height: 720
+  point_size: 2.0
 ```
 
 ---
 
-## 🎮 Usage
+## Usage
 
 ### Start Scanner Service (Raspberry Pi)
 ```bash
@@ -233,21 +301,33 @@ Scanner service running - press Ctrl+C to exit
 
 ### Launch GUI Viewer (Laptop)
 ```powershell
-cd C:\Users\robii\Documents\github_repos\rplidar\RPLidar-3D-PointCloud
-.\venv\Scripts\Activate.ps1
 python viewer/app.py
 ```
 
-1. Go to **"Scan Control"** tab
-2. Select **"dump_one_scan.py"** (default)
-3. Click **"Start Scan"**
-4. Wait for scan completion (~10-30 seconds)
-5. Go to **"Visualization"** tab
-6. Click **"Visualize in 3D Window"**
+### Run 3D Scan (with RandLA-Net Inference)
+
+1. Go to **"Scan Control"** tab.
+2. Select **"robust_3d"** scan type.
+3. Confirm LiDAR port (`auto` recommended).
+4. Click **"Start Scan"**.
+5. Wait for completion and file transfer (`robust_scan_full.ply`, `robust_scan_full.csv`).
+6. Go to **"Visualization"** and open the transferred `.ply` file.
+
+### Run Panorama Scan
+
+1. In `config_rpi.yaml`, set both `panorama.camera_index` and `panorama.camera_secondary_index` to explicit sources.
+2. In GUI **"Scan Control"**, select **"panorama"**.
+3. Click **"Start Scan"**.
+4. Wait for transfer of `data/images/panorama_*.jpg` files.
+5. Optionally stitch images on laptop using `viewer/panorama_stitcher.py`.
+
+Example stitched panorama output:
+
+![Example stitched panorama](readmefigures/panorama_stitched%20(2).jpg)
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Issue: "MQTT client not initialized"
 **Cause**: Mosquitto broker not running on laptop  
@@ -308,38 +388,42 @@ sudo usermod -a -G dialout raspberrypi
 
 ---
 
-## 📖 Documentation
+## Documentation
 
 - **[README_SETUP.md](README_SETUP.md)** - Complete setup guide for laptop and Raspberry Pi
 - **[DRIVER_INSTALL.md](DRIVER_INSTALL.md)** - CP210x USB driver installation (Windows)
 
 ---
 
-## 📦 Dependencies
+## Dependencies
 
 ### Laptop (Full)
 ```
-rplidar-roboticia==1.0.1  # RPLidar A1/A2 driver
-numpy>=1.24.0             # Numerical operations
-open3d>=0.18.0            # 3D visualization
-paho-mqtt==2.1.0          # MQTT client
-pyyaml>=6.0               # YAML config parsing
-pyserial>=3.5             # Serial port detection
+paho-mqtt                 # MQTT communication
+open3d==0.19.0            # 3D visualization and processing
+numpy
+opencv-python
+pyyaml                    # Configuration parsing
 ```
 
 ### Raspberry Pi (Minimal)
 ```
-rplidar-roboticia==1.0.1  # RPLidar A1/A2 driver
-numpy>=1.24.0             # Numerical operations
-paho-mqtt==2.1.0          # MQTT client
-pyyaml>=6.0               # YAML config parsing
-pyserial>=3.5             # Serial port detection
-# Note: open3d NOT required on RPi
+rplidar-roboticia         # LiDAR communication
+pyserial                  # Serial port detection
+paho-mqtt                 # MQTT communication
+pyyaml                    # Configuration parsing
+numpy<2
+scipy
+opencv-python-headless    # Panorama capture runtime
+gpiozero
+lgpio
+--extra-index-url https://download.pytorch.org/whl/cpu/
+torch>=2.2,<2.3           # Optional RandLA-Net inference runtime
 ```
 
 ---
 
-## 🎯 Design Decisions
+## Design Decisions
 
 ### Why MQTT?
 - **Decoupling**: Scanner and viewer run independently
@@ -353,13 +437,16 @@ pyserial>=3.5             # Serial port detection
 - Base64 encoding for binary-safe transmission
 - Progressive reassembly reduces memory usage
 
-### Why Deprecate 3D Scanning?
-- Requires user input during scan (servo angle prompts)
-- Not compatible with automated MQTT workflow
-- Can be re-implemented with automated servo control later
 
 ---
 
-## 📝 License
+## References
+
+1. Hu, Q., Yang, B., Xie, L., Rosa, S., Guo, Y., Wang, Z., Trigoni, N., and Markham, A. (2020). RandLA-Net: Efficient semantic segmentation of large-scale point clouds. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 11105-11114. https://doi.org/10.1109/CVPR42600.2020.01112
+2. Lyu, W., Ke, W., Sheng, H., Ma, X., and Zhang, H. (2024). Dynamic downsampling algorithm for 3D point cloud map based on voxel filtering. Applied Sciences, 14(8), 3160. https://doi.org/10.3390/app14083160
+
+---
+
+## License
 
 MIT License

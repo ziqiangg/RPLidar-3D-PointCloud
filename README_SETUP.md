@@ -156,9 +156,7 @@ Get-NetFirewallRule -DisplayName "Mosquitto MQTT"
 # Add firewall rule
 sudo ufw allow 1883/tcp
 
-# Verify
-
- rule
+# Verify rule
 sudo ufw status
 ```
 
@@ -247,18 +245,23 @@ Edit `config_laptop.yaml`:
 mqtt:
   broker_host: "localhost"      # Connect to local broker
   broker_port: 1883
-  client_id: "rplidar_viewer_laptop"
   qos: 1
 
-viewer:
+device:
+  role: "client"
+  client_id: "rplidar_viewer_laptop"
+
+data:
   receive_dir: "./data"         # Where to save received scans
-  auto_load: true               # Auto-load scans in GUI
-  window_width: 1024
-  window_height: 768
+  auto_load: true                # Auto-load scans in GUI
 
 logging:
   level: "INFO"
-  file: "laptop_viewer.log"
+
+viewer:
+  window_width: 1280
+  window_height: 720
+  point_size: 2.0
 ```
 
 **No changes needed unless:**
@@ -433,16 +436,34 @@ nano config_rpi.yaml
 mqtt:
   broker_host: ""  # ⚠️ CHANGE to your laptop IP!
   broker_port: 1883
-  client_id: "rplidar_scanner_rpi"
   qos: 1
 
-scanner:
-  default_port: "/dev/ttyUSB0"   # RPLidar USB port (usually correct)
-  scan_2d_script: "./dump_one_scan.py"
+device:
+  role: "scanner"
+  client_id: "rplidar_scanner_rpi"
+  default_port: "/dev/ttyUSB0"
+
+data:
+  output_dir: "./data"
+
+servo:
+  serial_port: "auto"            # Recommended
+  baudrate: 115200
+
+scan3d:
+  sweep_start: 0
+  sweep_end: 180
+  num_steps: 91
+
+panorama:
+  start_deg: 0
+  end_deg: 160
+  step_deg: 20
+  camera_index: "<set_primary_camera_source>"      # user configured
+  camera_secondary_index: "<set_secondary_camera_source>"  # user configured
 
 logging:
   level: "INFO"
-  file: "rpi_scanner.log"
 ```
 
 **Critical:** Replace `___` with your actual laptop IP address (from Step 1.4).
@@ -599,7 +620,7 @@ This will show all MQTT messages in real-time.
 In the GUI (laptop):
 
 1. Go to **"Scan Control"** tab
-2. **Script**: `dump_one_scan.py` (should be default)
+2. **Scan Type**: `robust_3d`
 3. **Port**: Leave empty (auto-detect)
 4. Click **"Start Scan"** button
 
@@ -615,14 +636,13 @@ Scan completed successfully
 
 **RPi Terminal Output:**
 ```
-INFO - Received scan command: scan_20260224_143022, type: 2d
+INFO - Received scan command: scan_20260224_143022, type: robust_3d
 INFO - Starting scan scan_20260224_143022
 INFO - Using port: /dev/ttyUSB0
-INFO - Running: ./dump_one_scan.py /dev/ttyUSB0
-INFO - Scan completed successfully: 1234 points
-INFO - Sending ply file: ./data/scan.ply (123456 bytes)
+INFO - Scan completed successfully
+INFO - Sending ply file: ./data/robust_scan_full.ply (... bytes)
 INFO - Completed sending ply file (3 chunks)
-INFO - Sending csv file: ./data/scan.csv (45678 bytes)
+INFO - Sending csv file: ./data/robust_scan_full.csv (... bytes)
 INFO - Completed sending csv file (1 chunk)
 ```
 
@@ -630,7 +650,7 @@ INFO - Completed sending csv file (1 chunk)
 ```
 rplidar/commands/scan {"scan_id": "scan_20260224_143022", ...}
 rplidar/status/scan_20260224_143022 {"status": "running", ...}
-rplidar/data/scan_20260224_143022 {"filename": "scan.ply", "chunk_index": 0, ...}
+rplidar/data/scan_20260224_143022 {"filename": "robust_scan_full.ply", "chunk_index": 0, ...}
 rplidar/status/scan_20260224_143022 {"status": "completed", ...}
 ```
 
@@ -642,7 +662,7 @@ In the GUI (laptop):
 
 1. Go to **"Visualization"** tab
 2. The scan should be **auto-loaded** (if `auto_load: true` in config)
-3. Or click **"Load File..."** and select `data/scan.ply`
+3. Or click **"Load File..."** and select `data/robust_scan_full.ply`
 4. Click **"Visualize in 3D Window"**
 
 **Expected:** New Open3D window opens showing your scanned point cloud!
@@ -663,8 +683,8 @@ Check that files were saved to laptop:
 # On laptop:
 dir data\
 # Should show:
-# scan.ply
-# scan.csv
+# robust_scan_full.ply
+# robust_scan_full.csv
 ```
 
 Check RPi also has the files:
@@ -673,8 +693,8 @@ Check RPi also has the files:
 # On RPi:
 ls -lh data/
 # Should show:
-# scan.ply
-# scan.csv
+# robust_scan_full.ply
+# robust_scan_full.csv
 ```
 
 ---
@@ -762,7 +782,7 @@ To use multiple RPi scanners with one laptop:
 
 1. **On each RPi**, edit `config_rpi.yaml`:
    ```yaml
-   mqtt:
+   device:
      client_id: "rplidar_scanner_rpi_1"  # Unique ID for each RPi!
    ```
 
@@ -805,7 +825,7 @@ ssh raspberrypi@<rpi-ip>
 
 ---
 
-## Issue: "Connection refused: you laptop ip:1883"
+## Issue: "Connection refused: your laptop ip:1883"
 
 **Cause**: Mosquitto not running on laptop OR firewall blocking
 
@@ -837,7 +857,7 @@ tail -f ~/rplidar-scanner/rpi_scanner.log
 ```
 
 **Look for**:
-- "Sending ply file" - means RPi is sending
+- "Sending ply/csv/jpg file" - means RPi is sending
 - If you see `rplidar/data/...` in MQTT but no files appear → check laptop client logs
 - If you don't see `rplidar/data/...` → check RPi logs for errors
 
@@ -877,45 +897,7 @@ ls -l /dev/ttyUSB*
 
 ---
 
-# Summary Checklist
-
-## Laptop Setup ✅
-- [ ] Mosquitto installed and running
-- [ ] Firewall configured (port 1883 open)
-- [ ] Repository cloned
-- [ ] Virtual environment created and activated
-- [ ] Dependencies installed (`requirements_laptop.txt`)
-- [ ] `config_laptop.yaml` configured
-- [ ] MQTT broker tested (MQTT Explorer or mosquitto_sub/pub)
-- [ ] GUI viewer launches without errors
-
-## Raspberry Pi Setup ✅
-- [ ] SSH access working
-- [ ] System updated
-- [ ] Repository cloned
-- [ ] Virtual environment created and activated
-- [ ] Dependencies installed (`requirements_rpi.txt`)
-- [ ] `config_rpi.yaml` configured with **correct laptop IP**
-- [ ] RPLidar connected and detected (`lsusb`, `/dev/ttyUSB0`)
-- [ ] User added to `dialout` group
-- [ ] Network connectivity verified (ping laptop, test MQTT)
-- [ ] Scanner service starts without errors
-
-## End-to-End Test ✅
-- [ ] Scanner service running on RPi
-- [ ] GUI viewer running on laptop
-- [ ] MQTT monitoring active (MQTT Explorer or mosquitto_sub)
-- [ ] Scan initiated from GUI
-- [ ] MQTT messages visible in explorer/sub
-- [ ] Files received in `data/` folder on laptop
-- [ ] Point cloud visualizes in Open3D
-
----
-
-**🎉 If all checks pass, your system is fully operational!**
-
 For questions or issues, check:
-- [README.md](README.md) - System architecture and overview
-- [DRIVER_INSTALL.md](DRIVER_INSTALL.md) - USB driver installation (Windows)
+- [DRIVER_INSTALL.md](DRIVER_INSTALL.md) - CP210 USB driver installation (Windows)
 - RPi logs: `~/rplidar-scanner/rpi_scanner.log`
 - Laptop logs: `laptop_viewer.log`
