@@ -48,6 +48,19 @@
 
 ![Physical scan setup](readmefigures/setup.png)
 
+### Robo Pico Firmware Flashing (Required)
+
+Before running robust_3d or panorama scans, flash the servo-controller firmware to the Robo Pico.
+
+1. Connect the Robo Pico to your computer via USB.
+2. Open Thonny.
+3. In Thonny, set interpreter to MicroPython (Raspberry Pi Pico).
+4. Open [FLASH/main.py](FLASH/main.py) from this repository.
+5. Save it to the Pico as [main.py](FLASH/main.py) on the device root.
+6. Reboot the Pico (or power-cycle USB) and reconnect it to RP5.
+
+Note: If the Pico is not running this firmware, RP5 servo commands (ANGLE/POLICY) will fail.
+
 ### 3D Scan Flow (Concise)
 
 1. Laptop publishes `scan_type: "robust_3d"` to `rplidar/commands/scan`.
